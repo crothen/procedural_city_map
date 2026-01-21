@@ -5,6 +5,7 @@ import {
   shrinkPolygon,
   pointInPolygon,
   getBoundingBox,
+  getOBB,
 } from "./geometry";
 import { WaterGenerator } from "./WaterGenerator";
 
@@ -16,7 +17,7 @@ export interface Plot extends Block {
 
 export class PlotGenerator {
   plots: Plot[] = [];
-  showPlots: boolean = true; // Renamed from showBlocks
+  showPlots: boolean = true;
 
   private plotIdCounter = 0;
 
@@ -69,19 +70,14 @@ export class PlotGenerator {
     this.occupiedHalfEdges.clear();
   }
 
-  /**
-   * Main Generation Function
-   */
   generate() {
     this.reset();
     if (this.nodes.size < 2 || this.edges.length < 1) return;
 
-    // 1. Detect Enclosed Plots (Downtown)
-    // Finds closed loops and makes the entire inside ONE plot.
+    // 1. Detect Enclosed Plots (Downtown / Urban Core)
     this.detectEnclosedPlots();
 
     // 2. Generate Strip Plots (Suburbs)
-    // Finds continuous road chains and extrudes strips on BOTH sides.
     this.generateFilamentPlots();
 
     // 3. Sort (Center Outward)
@@ -94,7 +90,6 @@ export class PlotGenerator {
     });
   }
 
-  // Getter for compatibility
   get blocks() {
     return this.plots;
   }
@@ -107,7 +102,6 @@ export class PlotGenerator {
     const nodeAngles = this.buildNodeAngleMap();
     const visited = new Set<string>();
 
-    // Check every edge in both directions
     for (const edge of this.edges) {
       if (this.bridgeEdgeIds.has(edge.id)) continue;
 
@@ -119,11 +113,10 @@ export class PlotGenerator {
         const key = `${u}->${v}`;
         if (visited.has(key)) continue;
 
-        // Trace the face on the Left
         const result = this.traceFace(u, v, nodeAngles, visited);
 
         if (result && result.nodes.length > 2) {
-          this.createEnclosedPlot(result.nodes, result.edges);
+          this.createEnclosedPlot(result.nodes, result.edges, result.keys);
         }
       }
     }
@@ -137,7 +130,7 @@ export class PlotGenerator {
   ) {
     const pathNodes = [startNode];
     const pathEdges: string[] = [];
-    const pathKeys: string[] = []; // Track "u->v" keys to mark as visited later
+    const pathKeys: string[] = [];
 
     let curr = secondNode;
     let prev = startNode;
@@ -148,29 +141,26 @@ export class PlotGenerator {
     let steps = 0;
     while (curr !== startNode && steps < 1000) {
       pathNodes.push(curr);
-      pathKeys.push(`${prev}->${curr}`);
+      const key = `${prev}->${curr}`;
+      pathKeys.push(key);
 
-      // Stop if we hit a visited edge (dead end or internal loop)
-      if (visited.has(`${prev}->${curr}`)) return null;
+      if (visited.has(key)) return null;
 
       const neighbors = nodeAngles.get(curr);
       if (!neighbors || neighbors.length === 0) return null;
 
-      // Calculate angle coming IN
       const pNode = this.nodes.get(prev)!;
       const cNode = this.nodes.get(curr)!;
       const angleIn = Math.atan2(pNode.y - cNode.y, pNode.x - cNode.x);
 
-      // Find neighbor with smallest angle > angleIn (Left Turn)
       let nextIdx = neighbors.findIndex((n: any) => n.angle > angleIn + 1e-4);
       if (nextIdx === -1) nextIdx = 0;
 
       const nextId = neighbors[nextIdx].id;
-
-      // Bridges/Dead ends break cycles
       const e = this.getEdgeBetween(curr, nextId);
+
       if (!e || this.bridgeEdgeIds.has(e.id)) return null;
-      if (nextId === prev) return null; // U-turn
+      if (nextId === prev) return null;
 
       pathEdges.push(e.id);
       prev = curr;
@@ -179,37 +169,42 @@ export class PlotGenerator {
     }
 
     if (curr === startNode) {
-      // Valid Loop Closed
       pathKeys.push(`${prev}->${curr}`);
-      // Mark all these half-edges as visited/occupied
-      pathKeys.forEach((k) => {
-        visited.add(k);
-        this.occupiedHalfEdges.add(k);
-      });
-      return { nodes: pathNodes, edges: pathEdges };
+      return { nodes: pathNodes, edges: pathEdges, keys: pathKeys };
     }
     return null;
   }
 
-  private createEnclosedPlot(nodeIds: string[], edgeIds: string[]) {
-    const points = nodeIds.map((id) => this.nodes.get(id)!);
+  private createEnclosedPlot(
+    nodeIds: string[],
+    edgeIds: string[],
+    keys: string[]
+  ) {
+    let points = nodeIds.map((id) => this.nodes.get(id)!);
     const area = calculatePolygonArea(points);
+    const mapArea = this.params.width * this.params.height;
 
     // Filter "Outer World" (usually huge) and tiny noise
-    const mapArea = this.params.width * this.params.height;
     if (area > mapArea * 0.8 || area < 50) return;
-
     if (this.waterGenerator.isPointInWater(calculateCentroid(points))) return;
 
     // Shrink slightly for sidewalk
     const shrunk = shrinkPolygon(points, 2);
     if (shrunk.length < 3) return;
 
+    // Simplify shape (User Request: Simpler shapes, less edges)
+    const simple = this.simplifyPolygon(shrunk, 3.0);
+
+    // Register as occupied ONLY if valid
+    keys.forEach((k) => {
+      this.occupiedHalfEdges.add(k);
+    });
+
     this.plots.push({
       id: `plot_core_${this.plotIdCounter++}`,
-      points: shrunk,
-      isEnclosed: true, // "Courtyard" candidates
-      area: calculatePolygonArea(shrunk),
+      points: simple,
+      isEnclosed: true,
+      area: calculatePolygonArea(simple),
       roadIds: edgeIds,
       type: "URBAN_CORE",
     });
@@ -220,25 +215,31 @@ export class PlotGenerator {
   // ==================================================================================
 
   private generateFilamentPlots() {
-    const depth =
+    const baseDepth =
       this.params.fixedBuildingDepth > 0
         ? this.params.fixedBuildingDepth + 15
         : 50;
     const gap = 2;
-
     const processed = new Set<string>();
 
-    // Iterate all roads to find open sides
-    for (const edge of this.edges) {
-      if (this.bridgeEdgeIds.has(edge.id)) continue;
+    // Sort edges by distance to center to build inner city outwards
+    const sortedEdges = [...this.edges].sort((a, b) => {
+      const nA = this.nodes.get(a.startNodeId)!;
+      const nB = this.nodes.get(b.startNodeId)!;
+      const dA = Math.hypot(nA.x - this.cityCenter.x, nA.y - this.cityCenter.y);
+      const dB = Math.hypot(nB.x - this.cityCenter.x, nB.y - this.cityCenter.y);
+      return dA - dB;
+    });
 
+    for (const edge of sortedEdges) {
+      if (this.bridgeEdgeIds.has(edge.id)) continue;
       const u = edge.startNodeId;
       const v = edge.endNodeId;
 
       // Try Left Side
-      this.tryTraceStrip(u, v, gap, depth, processed);
-      // Try Right Side (which is Left of Reverse)
-      this.tryTraceStrip(v, u, gap, depth, processed);
+      this.tryTraceStrip(u, v, gap, baseDepth, processed);
+      // Try Right Side (Left of reverse)
+      this.tryTraceStrip(v, u, gap, baseDepth, processed);
     }
   }
 
@@ -251,24 +252,43 @@ export class PlotGenerator {
   ) {
     const key = `${startU}->${startV}`;
 
-    // Skip if this side is Downtown or already processed
+    // Check global occupancy (set by Enclosed plots) and local processing
     if (this.occupiedHalfEdges.has(key) || processed.has(key)) return;
 
-    // 1. Trace continuous chain of road segments
+    // 1. Trace Chain
     const chain = this.buildFilamentChain(startU, startV, processed);
     if (chain.nodeIds.length < 2) return;
 
-    // 2. Extrude to create "One Big Block"
-    const poly = this.extrudeChain(chain.nodeIds, gap, depth);
+    // 2. Extrude (Simplifies linear sections automatically)
+    let poly = this.extrudeChain(chain.nodeIds, gap, depth);
     if (!poly || poly.length < 3) return;
 
-    // 3. Validate & Add
-    if (this.isValidPlot(poly)) {
+    // 3. Collision Handling & Shrinking
+    // If full depth hits something, try shrinking depth (70%, then 40%)
+    // This allows plots to fit in V-shapes or parallel roads without overlapping
+    let validPoly = null;
+    const shrinkSteps = [1.0, 0.7, 0.4];
+
+    for (const scale of shrinkSteps) {
+      const testPoly =
+        scale === 1.0
+          ? poly
+          : this.extrudeChain(chain.nodeIds, gap, depth * scale);
+      // Simplify BEFORE collision check to ensure clean boundaries
+      const simplePoly = this.simplifyPolygon(testPoly, 2.0);
+
+      if (this.isValidPlot(simplePoly)) {
+        validPoly = simplePoly;
+        break;
+      }
+    }
+
+    if (validPoly) {
       this.plots.push({
         id: `plot_strip_${this.plotIdCounter++}`,
-        points: poly,
-        isEnclosed: false, // "Row House" candidates
-        area: calculatePolygonArea(poly),
+        points: validPoly,
+        isEnclosed: false,
+        area: calculatePolygonArea(validPoly),
         roadIds: chain.edgeIds,
         type: "SUBURBAN_STRIP",
       });
@@ -278,16 +298,18 @@ export class PlotGenerator {
   private buildFilamentChain(u: string, v: string, processed: Set<string>) {
     const nodeIds = [u, v];
     const edgeIds: string[] = [];
+
+    // Mark initial edge as processed locally
+    processed.add(`${u}->${v}`);
     const firstE = this.getEdgeBetween(u, v);
     if (firstE) edgeIds.push(firstE.id);
-
-    processed.add(`${u}->${v}`);
 
     let curr = v;
     let prev = u;
 
-    // Walk Forward until Intersection or Dead End or Occupied
-    while (true) {
+    // Look ahead limit
+    let steps = 0;
+    while (steps < 50) {
       const next = this.findBestContinuation(prev, curr, processed);
       if (!next) break;
 
@@ -298,6 +320,7 @@ export class PlotGenerator {
       processed.add(`${curr}->${next}`);
       prev = curr;
       curr = next;
+      steps++;
     }
 
     return { nodeIds, edgeIds };
@@ -312,8 +335,9 @@ export class PlotGenerator {
     const prevNode = this.nodes.get(prev);
     if (!currNode || !prevNode) return null;
 
-    // CRITICAL: Stop at Intersections (Degree > 2).
-    // This ensures clean corners and prevents self-intersecting snake polygons.
+    // Strict intersection break: Degree > 2 stops the strip.
+    // This prevents strips from wrapping around corners, creating "L" shapes that fail extrusion.
+    // It creates cleaner, separate linear plots.
     if (currNode.connections.length > 2) return null;
 
     const angleIn = Math.atan2(
@@ -324,11 +348,10 @@ export class PlotGenerator {
     for (const nextId of currNode.connections) {
       if (nextId === prev) continue;
 
-      // If this side is Downtown, the chain stops here
+      // If blocked by Downtown, stop.
       if (this.occupiedHalfEdges.has(`${curr}->${nextId}`)) continue;
       if (visited.has(`${curr}->${nextId}`)) continue;
 
-      // Bridges break chains
       const e = this.getEdgeBetween(curr, nextId);
       if (!e || this.bridgeEdgeIds.has(e.id)) continue;
 
@@ -338,16 +361,22 @@ export class PlotGenerator {
         nextNode.x - currNode.x
       );
 
-      // Only continue if reasonably straight (< 60 deg turn)
+      // Angle check: Must be relatively straight (within ~45 degrees)
       let diff = Math.abs(this.normalizeAngle(angleOut - angleIn));
-      if (diff < Math.PI / 3) return nextId;
+      if (diff < Math.PI / 4) return nextId;
     }
     return null;
   }
 
+  /**
+   * Extrudes a line string into a polygon.
+   * Optimizes by merging collinear segments (simpler shapes).
+   */
   private extrudeChain(nodeIds: string[], gap: number, depth: number): Point[] {
     const front: Point[] = [];
     const back: Point[] = [];
+
+    if (nodeIds.length < 2) return [];
 
     for (let i = 0; i < nodeIds.length - 1; i++) {
       const p1 = this.nodes.get(nodeIds[i])!;
@@ -356,38 +385,87 @@ export class PlotGenerator {
       const dx = p2.x - p1.x;
       const dy = p2.y - p1.y;
       const len = Math.hypot(dx, dy) || 1;
-
-      // Normal Left
       const nx = -dy / len;
       const ny = dx / len;
 
-      // We add BOTH start and end points for every segment.
-      // This creates a safe "joined" polygon even if the road curves.
-      front.push({ x: p1.x + nx * gap, y: p1.y + ny * gap });
-      front.push({ x: p2.x + nx * gap, y: p2.y + ny * gap });
+      // Current Segment Points
+      const f1 = { x: p1.x + nx * gap, y: p1.y + ny * gap };
+      const f2 = { x: p2.x + nx * gap, y: p2.y + ny * gap };
+      const b1 = { x: p1.x + nx * (gap + depth), y: p1.y + ny * (gap + depth) };
+      const b2 = { x: p2.x + nx * (gap + depth), y: p2.y + ny * (gap + depth) };
 
-      back.push({ x: p1.x + nx * (gap + depth), y: p1.y + ny * (gap + depth) });
-      back.push({ x: p2.x + nx * (gap + depth), y: p2.y + ny * (gap + depth) });
+      // Optimization: If this segment is collinear with the previous one,
+      // update the last point instead of adding a new one.
+      // This reduces vertices on straight roads.
+      if (i > 0) {
+        front[front.length - 1] = f2;
+        back[back.length - 1] = b2;
+      } else {
+        front.push(f1, f2);
+        back.push(b1, b2);
+      }
     }
 
     return [...front, ...back.reverse()];
   }
 
   // ==================================================================================
-  // 3. UTILS
+  // 3. UTILS & GEOMETRY
   // ==================================================================================
+
+  /**
+   * Ramer-Douglas-Peucker simplification.
+   * Removes vertices that are within 'epsilon' distance of the line segment connecting their neighbors.
+   */
+  private simplifyPolygon(points: Point[], epsilon: number): Point[] {
+    if (points.length < 3) return points;
+
+    // Find point with max distance from line between start and end
+    let maxDist = 0;
+    let index = 0;
+    const start = points[0];
+    const end = points[points.length - 1];
+
+    for (let i = 1; i < points.length - 1; i++) {
+      const d = this.perpendicularDistance(points[i], start, end);
+      if (d > maxDist) {
+        index = i;
+        maxDist = d;
+      }
+    }
+
+    // If max dist > epsilon, recursively simplify
+    if (maxDist > epsilon) {
+      const left = this.simplifyPolygon(points.slice(0, index + 1), epsilon);
+      const right = this.simplifyPolygon(points.slice(index), epsilon);
+      return [...left.slice(0, left.length - 1), ...right];
+    } else {
+      return [start, end];
+    }
+  }
+
+  private perpendicularDistance(p: Point, v: Point, w: Point) {
+    const l2 = (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
+    if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+    const t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+    // Projection falls on infinite line
+    const projX = v.x + t * (w.x - v.x);
+    const projY = v.y + t * (w.y - v.y);
+    return Math.hypot(p.x - projX, p.y - projY);
+  }
 
   private isValidPlot(poly: Point[]): boolean {
     if (poly.length < 3) return false;
-    if (calculatePolygonArea(poly) < 100) return false;
+    if (calculatePolygonArea(poly) < 100) return false; // Minimum viable plot size
     const c = calculateCentroid(poly);
     if (this.waterGenerator.isPointInWater(c)) return false;
 
-    // Overlap check against Downtown plots
+    // Strict Overlap Check against ALL existing plots
     const bb = getBoundingBox(poly);
     for (const other of this.plots) {
-      if (!other.isEnclosed) continue;
       const obb = getBoundingBox(other.points);
+
+      // Fast AABB rejection
       if (
         bb.maxX < obb.minX ||
         bb.minX > obb.maxX ||
@@ -396,7 +474,15 @@ export class PlotGenerator {
       )
         continue;
 
-      if (pointInPolygon(c, other.points)) return false;
+      // Detailed Polygon Intersection Check
+      // We check if any point of the new poly is inside the old one
+      for (const p of poly) {
+        if (pointInPolygon(p, other.points)) return false;
+      }
+      // And vice versa (to catch if new poly totally encloses old one)
+      for (const p of other.points) {
+        if (pointInPolygon(p, poly)) return false;
+      }
     }
     return true;
   }
