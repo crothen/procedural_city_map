@@ -14,7 +14,7 @@ import {
   calculatePolygonArea,
   pointInPolygon,
 } from "./geometry";
-import { Plot } from "./PlotGenerator";
+import type { Plot } from "./PlotGenerator";
 
 export class BuildingGenerator {
   buildings: Building[] = [];
@@ -66,6 +66,10 @@ export class BuildingGenerator {
     this.lastStepBuildingIds.clear();
     this.buildingGrid.clear();
     this.buildingGenState = null;
+  }
+
+  clearBuildings() {
+    this.reset();
   }
 
   isGenerationActive() {
@@ -327,7 +331,7 @@ export class BuildingGenerator {
 
       // Define cut line at 'depth' distance
       const cutPt = { x: mid.x + nx * depth, y: mid.y + ny * depth };
-      const cutDir = { x: -ny, y: nx }; // Parallel to road
+
 
       const [front, back] = splitPolygon(current, cutPt, { x: nx, y: ny }); // Split along road normal? No, split parallel to road
 

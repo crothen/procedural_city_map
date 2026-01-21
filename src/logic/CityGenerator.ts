@@ -287,7 +287,7 @@ export class CityGenerator {
     this.buildingGen.clearBuildings();
   }
 
-  togglePlots() {
+  toggleBlocks() {
     this.blockGen.togglePlots();
   }
 
@@ -826,7 +826,7 @@ export class CityGenerator {
 
       const distFromCenter = Math.sqrt(
         (testPoint.x - this.cityBoundaryGen.cityCenter.x) ** 2 +
-          (testPoint.y - this.cityBoundaryGen.cityCenter.y) ** 2
+        (testPoint.y - this.cityBoundaryGen.cityCenter.y) ** 2
       );
       if (distFromCenter > this.cityBoundaryGen.cityRadius) {
         continue;

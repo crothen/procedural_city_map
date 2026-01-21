@@ -5,7 +5,6 @@ import {
   shrinkPolygon,
   pointInPolygon,
   getBoundingBox,
-  getOBB,
 } from "./geometry";
 import { WaterGenerator } from "./WaterGenerator";
 
