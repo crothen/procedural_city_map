@@ -44,7 +44,7 @@ const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = true }
                 onClick={() => setIsOpen(!isOpen)}
                 className={`w-full px-3 py-2 flex items-center justify-between transition-colors ${headerColors[color]} ${isOpen ? 'border-b' : ''}`}
             >
-                <h3 className="text-xs font-bold uppercase tracking-wider">{title}</h3>
+                <h3 className="text-sm font-bold uppercase tracking-wider">{title}</h3>
                 <svg
                     className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`}
                     fill="none"
@@ -79,14 +79,14 @@ const Toggle = ({ label, checked, onChange, color = 'cyan' }: {
 
     return (
         <div className="flex items-center justify-between py-1">
-            <label className="text-xs text-gray-400 cursor-pointer" onClick={onChange}>
+            <label className="text-sm text-gray-400 cursor-pointer" onClick={onChange}>
                 {label}
             </label>
             <div
                 onClick={onChange}
-                className={`w-8 h-4 rounded-full cursor-pointer relative transition-colors ${checked ? colorClasses[color] : 'bg-gray-700'}`}
+                className={`w-10 h-5 rounded-full cursor-pointer relative transition-colors ${checked ? colorClasses[color] : 'bg-gray-700'}`}
             >
-                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`} />
+                <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
             </div>
         </div>
     );
@@ -117,8 +117,8 @@ const Slider = ({ label, value, min, max, step, onChange, color = 'cyan', unit =
     return (
         <div>
             <div className="flex justify-between mb-1">
-                <label className="text-xs text-gray-500">{label}</label>
-                <span className={`text-xs font-mono ${colorClasses[color]}`}>{displayValue}{unit}</span>
+                <label className="text-sm text-gray-500">{label}</label>
+                <span className={`text-sm font-mono ${colorClasses[color]}`}>{displayValue}{unit}</span>
             </div>
             <input
                 type="range"
@@ -127,7 +127,7 @@ const Slider = ({ label, value, min, max, step, onChange, color = 'cyan', unit =
                 step={step}
                 value={value}
                 onChange={(e) => onChange(parseFloat(e.target.value))}
-                className={`w-full h-1.5 bg-gray-700 rounded appearance-none cursor-pointer ${colorClasses[color]}`}
+                className={`w-full h-2.5 bg-gray-700 rounded appearance-none cursor-pointer ${colorClasses[color]}`}
             />
         </div>
     );
@@ -141,11 +141,11 @@ const Select = ({ label, value, options, onChange }: {
     onChange: (value: string) => void;
 }) => (
     <div>
-        <label className="text-xs text-gray-500 mb-1 block">{label}</label>
+        <label className="text-sm text-gray-500 mb-1 block">{label}</label>
         <select
             value={value}
             onChange={(e) => onChange(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 text-white rounded px-2 py-1.5 text-xs focus:border-cyan-500 outline-none"
+            className="w-full bg-gray-800 border border-gray-700 text-white rounded px-2 py-2 text-sm focus:border-cyan-500 outline-none"
         >
             {options.map(opt => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -173,7 +173,7 @@ const SmallButton = ({ children, onClick, variant = 'default', disabled = false,
         <button
             onClick={onClick}
             disabled={disabled}
-            className={`px-2 py-1.5 rounded text-xs font-medium transition-colors border disabled:opacity-40 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
+            className={`px-3 py-2 rounded text-sm font-medium transition-colors border disabled:opacity-40 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
         >
             {children}
         </button>
@@ -208,8 +208,8 @@ export const ControlPanel = ({
     const hasBuildings = buildingCount > 0;
 
     return (
-        <div className="w-[300px] h-full bg-[#0d0d10] border-r border-white/10 p-4 text-white flex flex-col shadow-xl z-10 flex-shrink-0 overflow-y-auto">
-            <h2 className="text-xl font-bold mb-4 bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent">
+        <div className="w-[360px] h-full bg-[#0d0d10] border-r border-white/10 p-5 text-white flex flex-col shadow-xl z-10 flex-shrink-0 overflow-y-auto">
+            <h2 className="text-2xl font-bold mb-4 bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent">
                 City Generator
             </h2>
 
@@ -283,8 +283,8 @@ export const ControlPanel = ({
             <CollapsibleCard title="Buildings" color="amber">
                 {/* Plots Row */}
                 <div className="flex items-center gap-2 mb-3 pb-3 border-b border-white/5">
-                    <span className="text-xs text-gray-400 flex-shrink-0">Plots</span>
-                    <span className="text-xs font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">{plotCount}</span>
+                    <span className="text-sm text-gray-400 flex-shrink-0">Plots</span>
+                    <span className="text-sm font-mono text-amber-400 bg-amber-500/10 px-2 py-1 rounded">{plotCount}</span>
                     <div className="flex-1" />
                     <SmallButton onClick={onGeneratePlots} variant="primary" className="!bg-amber-900/40 !text-amber-400 !border-amber-500/30 hover:!bg-amber-800/50">
                         Generate
@@ -350,8 +350,8 @@ export const ControlPanel = ({
 
                 {/* Buildings Row */}
                 <div className="flex items-center gap-2 mt-3 pt-3 border-t border-white/5">
-                    <span className="text-xs text-gray-400 flex-shrink-0">Buildings</span>
-                    <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">{buildingCount}</span>
+                    <span className="text-sm text-gray-400 flex-shrink-0">Buildings</span>
+                    <span className="text-sm font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded">{buildingCount}</span>
                     <div className="flex-1" />
                     <SmallButton
                         onClick={onGenerateBuildings}
@@ -366,7 +366,7 @@ export const ControlPanel = ({
                     </SmallButton>
                 </div>
                 {!hasPlots && (
-                    <p className="text-[10px] text-gray-600 mt-1 text-right">Generate plots first</p>
+                    <p className="text-xs text-gray-600 mt-1 text-right">Generate plots first</p>
                 )}
             </CollapsibleCard>
 
@@ -383,12 +383,12 @@ export const ControlPanel = ({
             {/* Reset All */}
             <button
                 onClick={onReset}
-                className="w-full py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg font-semibold text-sm text-gray-300 transition-colors border border-white/5 mt-auto"
+                className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-semibold text-base text-gray-300 transition-colors border border-white/5 mt-auto"
             >
                 RESET ALL
             </button>
 
-            <div className="mt-3 text-[10px] text-gray-600 font-mono text-center">
+            <div className="mt-3 text-xs text-gray-600 font-mono text-center">
                 Pan: Drag • Zoom: Scroll
             </div>
         </div>
