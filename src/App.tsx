@@ -131,12 +131,12 @@ function App() {
     generator.resetWater();
   };
 
-  const handleGenerateBlocks = () => {
+  const handleGeneratePlots = () => {
     generator.generateBlocks();
     forceUpdate(n => n + 1); // Update UI to enable building generation
   };
 
-  const handleClearBlocks = () => {
+  const handleClearPlots = () => {
     generator.clearBlocks();
     forceUpdate(n => n + 1); // Update UI
   };
@@ -163,14 +163,14 @@ function App() {
         onGenerateWater={handleGenerateWater}
         showGrid={showGrid}
         onToggleGrid={() => setShowGrid(!showGrid)}
-        showBlocks={generator.showBlocks}
-        onToggleBlocks={() => generator.toggleBlocks()}
-        onGenerateBlocks={handleGenerateBlocks}
-        onClearBlocks={handleClearBlocks}
+        showPlots={generator.showBlocks}
+        onTogglePlots={() => generator.toggleBlocks()}
+        onGeneratePlots={handleGeneratePlots}
+        onClearPlots={handleClearPlots}
         onGenerateBuildings={handleGenerateBuildings}
         onClearBuildings={handleClearBuildings}
         buildingCount={generator.buildings.length}
-        blockCount={generator.blocks.length}
+        plotCount={generator.blocks.length}
         isBuildingGenerating={generator.isBuildingGenerationActive()}
       />
 
@@ -184,7 +184,7 @@ function App() {
           />
         )}
         <div className="absolute create-pointer-events-none bottom-4 right-4 text-white/30 text-xs font-mono bg-black/40 px-3 py-1 rounded backdrop-blur-sm pointer-events-none">
-          Agents: {generator.activeAgents.length} • Nodes: {generator.nodes.size} • Blocks: {generator.blocks.length} • Buildings: {generator.buildings.length}
+          Agents: {generator.activeAgents.length} • Nodes: {generator.nodes.size} • Plots: {generator.blocks.length} • Buildings: {generator.buildings.length}
         </div>
       </div>
     </div>

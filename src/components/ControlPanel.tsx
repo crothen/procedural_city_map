@@ -11,14 +11,14 @@ interface ControlPanelProps {
     onGenerateWater: () => void;
     showGrid: boolean;
     onToggleGrid: () => void;
-    showBlocks: boolean;
-    onToggleBlocks: () => void;
-    onGenerateBlocks: () => void;
-    onClearBlocks: () => void;
+    showPlots: boolean;
+    onTogglePlots: () => void;
+    onGeneratePlots: () => void;
+    onClearPlots: () => void;
     onGenerateBuildings: () => void;
     onClearBuildings: () => void;
     buildingCount: number;
-    blockCount: number;
+    plotCount: number;
     isBuildingGenerating: boolean;
 }
 
@@ -189,14 +189,14 @@ export const ControlPanel = ({
     onGenerateWater,
     showGrid,
     onToggleGrid,
-    showBlocks,
-    onToggleBlocks,
-    onGenerateBlocks,
-    onClearBlocks,
+    showPlots,
+    onTogglePlots,
+    onGeneratePlots,
+    onClearPlots,
     onGenerateBuildings,
     onClearBuildings,
     buildingCount,
-    blockCount,
+    plotCount,
     isBuildingGenerating
 }: ControlPanelProps) => {
 
@@ -204,7 +204,7 @@ export const ControlPanel = ({
         onChange({ ...params, [key]: value });
     };
 
-    const hasBlocks = blockCount > 0;
+    const hasPlots = plotCount > 0;
     const hasBuildings = buildingCount > 0;
 
     return (
@@ -281,23 +281,23 @@ export const ControlPanel = ({
 
             {/* Buildings */}
             <CollapsibleCard title="Buildings" color="amber">
-                {/* Blocks Row */}
+                {/* Plots Row */}
                 <div className="flex items-center gap-2 mb-3 pb-3 border-b border-white/5">
-                    <span className="text-xs text-gray-400 flex-shrink-0">Blocks</span>
-                    <span className="text-xs font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">{blockCount}</span>
+                    <span className="text-xs text-gray-400 flex-shrink-0">Plots</span>
+                    <span className="text-xs font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">{plotCount}</span>
                     <div className="flex-1" />
-                    <SmallButton onClick={onGenerateBlocks} variant="primary" className="!bg-amber-900/40 !text-amber-400 !border-amber-500/30 hover:!bg-amber-800/50">
+                    <SmallButton onClick={onGeneratePlots} variant="primary" className="!bg-amber-900/40 !text-amber-400 !border-amber-500/30 hover:!bg-amber-800/50">
                         Generate
                     </SmallButton>
-                    <SmallButton onClick={onClearBlocks} disabled={!hasBlocks}>
+                    <SmallButton onClick={onClearPlots} disabled={!hasPlots}>
                         Clear
                     </SmallButton>
                 </div>
 
                 <Toggle
-                    label="Show Blocks"
-                    checked={showBlocks}
-                    onChange={onToggleBlocks}
+                    label="Show Plots"
+                    checked={showPlots}
+                    onChange={onTogglePlots}
                     color="amber"
                 />
                 <Slider
@@ -355,9 +355,9 @@ export const ControlPanel = ({
                     <div className="flex-1" />
                     <SmallButton
                         onClick={onGenerateBuildings}
-                        disabled={!hasBlocks || isBuildingGenerating}
+                        disabled={!hasPlots || isBuildingGenerating}
                         variant="success"
-                        className={!hasBlocks ? '!opacity-40' : ''}
+                        className={!hasPlots ? '!opacity-40' : ''}
                     >
                         {isBuildingGenerating ? 'Running...' : 'Generate'}
                     </SmallButton>
@@ -365,8 +365,8 @@ export const ControlPanel = ({
                         Clear
                     </SmallButton>
                 </div>
-                {!hasBlocks && (
-                    <p className="text-[10px] text-gray-600 mt-1 text-right">Generate blocks first</p>
+                {!hasPlots && (
+                    <p className="text-[10px] text-gray-600 mt-1 text-right">Generate plots first</p>
                 )}
             </CollapsibleCard>
 
