@@ -208,7 +208,7 @@ export const ControlPanel = ({
     const hasBuildings = buildingCount > 0;
 
     return (
-        <div className="w-[360px] h-full bg-[#0d0d10] border-r border-white/10 p-5 text-white flex flex-col shadow-xl z-10 flex-shrink-0 overflow-y-auto">
+        <div className="w-[360px] h-full bg-[#0d0d10] border-r border-white/10 p-5 text-white flex flex-col shadow-xl z-10 flex-shrink-0 overflow-y-auto custom-scrollbar">
             <h2 className="text-2xl font-bold mb-4 bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent">
                 City Generator
             </h2>
