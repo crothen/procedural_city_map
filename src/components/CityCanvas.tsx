@@ -7,9 +7,11 @@ interface CityCanvasProps {
     width: number;
     height: number;
     showGrid: boolean;
+    onCanvasClick?: (point: { x: number, y: number }) => void;
+    isPlacingCenter?: boolean;
 }
 
-export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasProps) => {
+export const CityCanvas = ({ generator, width, height, showGrid, onCanvasClick, isPlacingCenter }: CityCanvasProps) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
     // Initial View Logic (Center the 2000x2000 world)
@@ -41,6 +43,9 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
         const canvas = canvasRef.current;
         if (!canvas) return;
 
+        // Set cursor
+        canvas.style.cursor = isPlacingCenter ? 'crosshair' : 'grab';
+
         // Wheel Zoom
         const handleWheel = (e: WheelEvent) => {
             e.preventDefault();
@@ -53,12 +58,6 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
             const mouseX = e.clientX - rect.left;
             const mouseY = e.clientY - rect.top;
 
-            // Zoom point math: newScale = oldScale * scaleChange
-            // We want the point under the mouse to stay stationary.
-            // (x - viewX) / viewScale = worldX
-            // worldX * newScale + newViewX = x
-            // => newViewX = x - worldX * newScale
-
             const worldX = (mouseX - view.x) / view.scale;
             const worldY = (mouseY - view.y) / view.scale;
 
@@ -69,11 +68,28 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
 
         // Pan Start
         const handleMouseDown = (e: MouseEvent) => {
+            // If placing center, do NOT start dragging
+            if (isPlacingCenter) return;
+
             const view = viewRef.current;
             view.isDragging = true;
             view.lastX = e.clientX;
             view.lastY = e.clientY;
             canvas.style.cursor = 'grabbing';
+        };
+
+        const handleClick = (e: MouseEvent) => {
+            if (!isPlacingCenter || !onCanvasClick) return;
+
+            const view = viewRef.current;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const worldX = (mouseX - view.x) / view.scale;
+            const worldY = (mouseY - view.y) / view.scale;
+
+            onCanvasClick({ x: worldX, y: worldY });
         };
 
         // Pan Move
@@ -92,22 +108,27 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
 
         // Pan End
         const handleMouseUp = () => {
-            viewRef.current.isDragging = false;
-            canvas.style.cursor = 'grab';
+            const view = viewRef.current;
+            if (view.isDragging) {
+                view.isDragging = false;
+                canvas.style.cursor = 'grab';
+            }
         };
 
         canvas.addEventListener('wheel', handleWheel, { passive: false });
         canvas.addEventListener('mousedown', handleMouseDown);
+        canvas.addEventListener('click', handleClick);
         window.addEventListener('mousemove', handleMouseMove);
         window.addEventListener('mouseup', handleMouseUp);
 
         return () => {
             canvas.removeEventListener('wheel', handleWheel);
             canvas.removeEventListener('mousedown', handleMouseDown);
+            canvas.removeEventListener('click', handleClick);
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
         };
-    }, []); // Bind once
+    }, [isPlacingCenter, onCanvasClick]);
 
     // Render Loop
     useEffect(() => {
@@ -131,14 +152,67 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
             ctx.translate(view.x, view.y);
             ctx.scale(view.scale, view.scale);
 
-            // Draw Map Boundary (visible border)
-            ctx.strokeStyle = '#333';
-            ctx.lineWidth = 4;
-            ctx.strokeRect(0, 0, generator.params.width, generator.params.height);
-
             // Draw subtle background for the map area
             ctx.fillStyle = '#0a0a0c';
             ctx.fillRect(0, 0, generator.params.width, generator.params.height);
+
+            // Clip content to map bounds to prevent rivers/elements from drawing outside
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(0, 0, generator.params.width, generator.params.height);
+            ctx.clip();
+
+            // Draw City Limit Gradient (Visualization)
+            if (generator.params.showCityLimitGradient && generator.cityBoundary.length > 2) {
+                // Unified Rendering: Draw the entire density map (Inner + Outer) using pixel buffer
+                // This ensures perfect color consistency and eliminates seams/artifacts.
+
+                const renderScale = 0.25;
+                const scaledW = Math.ceil(generator.params.width * renderScale);
+                const scaledH = Math.ceil(generator.params.height * renderScale);
+
+                const imgData = ctx.createImageData(scaledW, scaledH);
+                const data = imgData.data;
+
+                // Base Color: Red (200, 50, 50)
+                // Base Opacity: 0.3 (~76/255)
+                const baseAlpha = 76;
+
+                for (let y = 0; y < scaledH; y++) {
+                    for (let x = 0; x < scaledW; x++) {
+                        const worldX = x / renderScale;
+                        const worldY = y / renderScale;
+
+                        const density = generator.getUrbanDensity({ x: worldX, y: worldY });
+
+                        if (density > 0) {
+                            const index = (y * scaledW + x) * 4;
+                            data[index] = 200;
+                            data[index + 1] = 50;
+                            data[index + 2] = 50;
+                            // Alpha is proportional to density, maxing out at baseAlpha (0.3)
+                            // Density 1.0 -> Alpha 76 (0.3)
+                            // Density 0.5 -> Alpha 38 (0.15)
+                            data[index + 3] = Math.floor(density * baseAlpha);
+                        }
+                    }
+                }
+
+                // Create offscreen canvas and scale up
+                const offscreen = document.createElement('canvas');
+                offscreen.width = scaledW;
+                offscreen.height = scaledH;
+                const offCtx = offscreen.getContext('2d');
+                if (offCtx) {
+                    offCtx.putImageData(imgData, 0, 0);
+
+                    ctx.save();
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = 'medium';
+                    ctx.drawImage(offscreen, 0, 0, scaledW, scaledH, 0, 0, generator.params.width, generator.params.height);
+                    ctx.restore();
+                }
+            }
 
             // Draw City Boundary (organic polygon)
             if (generator.cityBoundary.length > 2) {
@@ -274,7 +348,7 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
                 // Draw regular buildings first
                 generator.buildings.forEach(building => {
                     if (building.points.length < 3) return;
-                    if (generator.lastStepBuildingIds.has(building.id)) return; // Draw highlighted ones later
+
 
                     ctx.beginPath();
                     ctx.moveTo(building.points[0].x, building.points[0].y);
@@ -293,29 +367,7 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
                     ctx.stroke();
                 });
 
-                // Draw newly created buildings with highlight
-                if (generator.lastStepBuildingIds.size > 0) {
-                    generator.lastStepBuildingIds.forEach(buildingId => {
-                        const building = generator.buildings.find(b => b.id === buildingId);
-                        if (!building || building.points.length < 3) return;
 
-                        ctx.beginPath();
-                        ctx.moveTo(building.points[0].x, building.points[0].y);
-                        for (let i = 1; i < building.points.length; i++) {
-                            ctx.lineTo(building.points[i].x, building.points[i].y);
-                        }
-                        ctx.closePath();
-
-                        // Highlighted building (lighter turquoise)
-                        ctx.fillStyle = '#5dd9bf';
-                        ctx.fill();
-
-                        // Bright outline for new buildings
-                        ctx.strokeStyle = '#ffffff';
-                        ctx.lineWidth = 2;
-                        ctx.stroke();
-                    });
-                }
             }
 
             // Batch Draw Highlighted Edges
@@ -343,13 +395,20 @@ export const CityCanvas = ({ generator, width, height, showGrid }: CityCanvasPro
 
             // Draw Agents
             ctx.fillStyle = '#ff003c';
-            const agentRadius = 4 / Math.sqrt(view.scale); // Keep visual size relatively constant or let them scale? Let them scale naturally but maybe clamp min size.
+            const agentRadius = 4 / Math.sqrt(view.scale);
 
             generator.activeAgents.forEach(agent => {
                 ctx.beginPath();
                 ctx.arc(agent.pos.x, agent.pos.y, agentRadius, 0, Math.PI * 2);
                 ctx.fill();
             });
+
+            ctx.restore(); // Remove clip
+
+            // Draw Map Boundary (visible border) - drawn last to cover cut edges
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(0, 0, generator.params.width, generator.params.height);
 
             animationFrameId = requestAnimationFrame(render);
         };

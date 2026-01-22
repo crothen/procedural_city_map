@@ -18,8 +18,12 @@ function App() {
     segmentLength: 8,
     strategy: 'ORGANIC',
     waterFeature: 'NONE',
-    citySize: 0.7, // 70% of map by default
+    citySize: 0.4, // 40% of map by default
     hardCityLimit: false, // Soft city limits by default
+    outerCityFalloff: 0.3, // 30% falloff
+    outerCityRandomness: 0.4, // 40% randomness default
+    showCityLimitGradient: false,
+    riverWidth: 50, // Default 50 meters
     // Building generation (area-based)
     minBuildingArea: 64, // Minimum building area (8x8 pixels)
     maxBuildingArea: 625, // Maximum area before splitting (25x25 pixels)
@@ -35,6 +39,21 @@ function App() {
   const requestRef = useRef<number | undefined>(undefined);
 
   const generator = generatorRef.current;
+
+  // Manual city center placement
+  const [isPlacingCenter, setIsPlacingCenter] = useState(false);
+
+  const handlePlaceCenterStart = () => {
+    setIsPlacingCenter(true);
+  };
+
+  const handleCanvasClick = (point: { x: number, y: number }) => {
+    if (isPlacingCenter) {
+      generator.setCityCenter(point);
+      setIsPlacingCenter(false);
+      forceUpdate(n => n + 1);
+    }
+  };
 
   // Sync params
   useEffect(() => {
@@ -172,6 +191,8 @@ function App() {
         buildingCount={generator.buildings.length}
         plotCount={generator.blocks.length}
         isBuildingGenerating={generator.isBuildingGenerationActive()}
+        onPlaceCenter={handlePlaceCenterStart}
+        isPlacingCenter={isPlacingCenter}
       />
 
       <div ref={containerRef} className="flex-1 relative">
@@ -181,6 +202,8 @@ function App() {
             width={dimensions.width}
             height={dimensions.height}
             showGrid={showGrid}
+            onCanvasClick={handleCanvasClick}
+            isPlacingCenter={isPlacingCenter}
           />
         )}
         <div className="absolute create-pointer-events-none bottom-4 right-4 text-white/30 text-xs font-mono bg-black/40 px-3 py-1 rounded backdrop-blur-sm pointer-events-none">

@@ -19,7 +19,20 @@ export class CityGenerator {
   nodes: Map<string, Node> = new Map();
   edges: Edge[] = [];
   activeAgents: Agent[] = [];
-  params: GenerationParams;
+  // Private backing field
+  private _params: GenerationParams;
+
+  get params(): GenerationParams {
+    return this._params;
+  }
+
+  set params(newParams: GenerationParams) {
+    this._params = newParams;
+    this.waterGen.updateParams(newParams);
+    this.cityBoundaryGen.updateParams(newParams);
+    this.blockGen.updateParams(newParams);
+    this.buildingGen.updateParams(newParams);
+  }
 
   // Sub-generators
   private waterGen: WaterGenerator;
@@ -32,6 +45,23 @@ export class CityGenerator {
   private bridgePositions: Point[] = [];
   private readonly maxBridgeableWidth = 60;
   private readonly minBridgeSpacing = 200;
+
+  /**
+   * Manually set the city center and regenerate boundary + initial roads.
+   */
+  setCityCenter(point: Point) {
+    this.cityBoundaryGen.initialize(point);
+    this.generate();
+    // Clear buildings/plots as they are invalid now
+    this.buildingGen.reset();
+  }
+
+  generate() {
+    this.resetRoads();
+    const center = this.cityBoundaryGen.cityCenter;
+    const startNode = this.addNode(center);
+    this.initializeAgents(startNode);
+  }
 
   // Exit road tracking
   private exitRoadCount = 0;
@@ -48,7 +78,7 @@ export class CityGenerator {
   private fillCheckInterval = 20;
 
   constructor(params: GenerationParams) {
-    this.params = params;
+    this._params = params;
 
     this.waterGen = new WaterGenerator(params);
     this.cityBoundaryGen = new CityBoundary(params, this.waterGen);
@@ -86,6 +116,10 @@ export class CityGenerator {
 
   get cityCityBoundary(): Point[] {
     return this.cityBoundaryGen.cityBoundary;
+  }
+
+  getUrbanDensity(point: Point): number {
+    return this.cityBoundaryGen.getUrbanDensity(point);
   }
 
   // Alias for backwards compatibility
@@ -235,12 +269,14 @@ export class CityGenerator {
     this.blockGen.reset();
     this.buildingGen.reset();
 
-    const startPoint = this.cityBoundaryGen.findValidStartPoint();
+    // Re-initialize boundary, respecting any existing manual center
+    this.cityBoundaryGen.initialize();
+
+    // Sync generator center with boundary center
+    const startPoint = this.cityBoundaryGen.cityCenter;
     const startNode = this.addNode(startPoint);
 
-    this.cityBoundaryGen.cityCenter.x = startPoint.x;
-    this.cityBoundaryGen.cityCenter.y = startPoint.y;
-    this.cityBoundaryGen.generate();
+    // this.cityBoundaryGen.generate(); - initialize() calls generate()
 
     this.blockGen.updateRefs(
       this.nodes,
@@ -290,6 +326,8 @@ export class CityGenerator {
   toggleBlocks() {
     this.blockGen.togglePlots();
   }
+
+
 
   // ==================== ROAD STEPPING ====================
 
@@ -407,6 +445,7 @@ export class CityGenerator {
       // City boundary check
       const insideCity = this.cityBoundaryGen.isPointInsideCity(nextPos);
       const wasInsideCity = this.cityBoundaryGen.isPointInsideCity(agent.pos);
+      const density = this.getUrbanDensity(nextPos); // Get density (0.0 - 1.0)
 
       if (this.params.hardCityLimit) {
         if (!insideCity && wasInsideCity) {
@@ -422,22 +461,24 @@ export class CityGenerator {
           }
         }
       } else {
-        if (!insideCity) {
-          const distToBoundary =
-            this.cityBoundaryGen.distanceToNearestBoundaryPoint(nextPos);
-          const stopProbability = Math.min(0.85, 0.02 + distToBoundary * 0.001);
+        // Soft Limit logic driven by Density
+        // Lower density = Higher chance of stopping
+        // Density 1.0 -> Stop Prob ~0.01 (1%)
+        // Density 0.0 -> Stop Prob ~0.21 (21%)
+        const baseStopChance = 0.01;
+        const lowDensityPenalty = Math.pow(1 - density, 3) * 0.2;
+        const stopProbability = baseStopChance + lowDensityPenalty;
 
-          if (Math.random() < stopProbability) {
-            deadAgentsIndices.push(index);
-            return;
-          }
+        if (Math.random() < stopProbability) {
+          deadAgentsIndices.push(index);
+          return;
+        }
 
-          if (agent.stepsSinceBranch >= 0) {
-            const branchingReduction = Math.floor(distToBoundary * 0.05);
-            agent.stepsSinceBranch = Math.max(
-              agent.stepsSinceBranch - branchingReduction,
-              0
-            );
+        // Reduce branch timer if in low density to suppress rapid growth
+        if (agent.stepsSinceBranch >= 0 && density < 0.3) {
+          const reduction = Math.floor((1 - density) * 2);
+          if (reduction > 0) {
+            agent.stepsSinceBranch = Math.max(0, agent.stepsSinceBranch - reduction);
           }
         }
       }
@@ -491,6 +532,8 @@ export class CityGenerator {
             agent.pos,
             angle
           );
+          // If we hit water and don't bridge, follow it (if getting denser) or turn?
+          // Existing logic: follow river
           const riverDirection = perpAngle + Math.PI / 2;
           const turnDirection = Math.random() > 0.5 ? 0 : Math.PI;
           agent.dir = riverDirection + turnDirection;
@@ -544,13 +587,20 @@ export class CityGenerator {
       agent.parentNodeId = newNode.id;
       agent.stepsSinceBranch++;
 
-      // Branching logic
+      // Branching logic driven by Density
       const roll = Math.random();
-      const currentlyInsideCity =
-        this.cityBoundaryGen.isPointInsideCity(nextPos);
-      const canBranch = agent.stepsSinceBranch >= 0 && currentlyInsideCity;
+      // Only branch if inside city (or if density is high enough?)
+      // Let's use density as the primary factor.
+
+      const canBranch = agent.stepsSinceBranch >= 0;
+
+      // Scale branching probabilities by density
+      // High density -> Higher branching factor
+      // Low density -> Lower branching factor
+      const effectiveBranchingFactor = this.params.branchingFactor * density;
+
       const accumulatedProbability = canBranch
-        ? 1 - Math.pow(1 - this.params.branchingFactor, agent.stepsSinceBranch)
+        ? 1 - Math.pow(1 - effectiveBranchingFactor, agent.stepsSinceBranch)
         : 0;
       const shouldBranch = roll < accumulatedProbability;
 
@@ -561,12 +611,11 @@ export class CityGenerator {
           const firstTurn = (Math.random() > 0.5 ? 1 : -1) * (Math.PI / 2);
           turns.push(firstTurn);
 
-          if (
-            this.params.branchingFactor > 0.5 &&
-            Math.random() < this.params.branchingFactor
-          ) {
+          if (density > 0.7 && Math.random() > 0.5) {
+            // Double branch in high density
             turns.push(-firstTurn);
           }
+
 
           turns.forEach((turn) => {
             newAgents.push({

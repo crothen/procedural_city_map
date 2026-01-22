@@ -20,10 +20,12 @@ interface ControlPanelProps {
     buildingCount: number;
     plotCount: number;
     isBuildingGenerating: boolean;
+    onPlaceCenter: () => void;
+    isPlacingCenter: boolean;
 }
 
 // Collapsible card section
-const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = true }: {
+const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = false }: {
     title: string;
     children: React.ReactNode;
     color?: string;
@@ -36,10 +38,12 @@ const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = true }
         purple: 'bg-purple-500/10 border-purple-500/30 text-purple-400 hover:bg-purple-500/20',
         amber: 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20',
         blue: 'bg-blue-500/10 border-blue-500/30 text-blue-400 hover:bg-blue-500/20',
+        green: 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/20',
+        orange: 'bg-orange-500/10 border-orange-500/30 text-orange-400 hover:bg-orange-500/20',
     };
 
     return (
-        <div className="bg-gray-900/50 rounded-lg border border-white/5 overflow-hidden mb-3">
+        <div className="bg-gray-900/50 rounded-lg border border-white/5 overflow-hidden mb-3 shrink-0">
             <button
                 onClick={() => setIsOpen(!isOpen)}
                 className={`w-full px-3 py-2 flex items-center justify-between transition-colors ${headerColors[color]} ${isOpen ? 'border-b' : ''}`}
@@ -197,7 +201,9 @@ export const ControlPanel = ({
     onClearBuildings,
     buildingCount,
     plotCount,
-    isBuildingGenerating
+    isBuildingGenerating,
+    onPlaceCenter,
+    isPlacingCenter
 }: ControlPanelProps) => {
 
     const handleChange = (key: keyof GenerationParams, value: number | string | boolean) => {
@@ -209,17 +215,57 @@ export const ControlPanel = ({
 
     return (
         <div className="w-[360px] h-full bg-[#0d0d10] border-r border-white/10 p-5 text-white flex flex-col shadow-xl z-10 flex-shrink-0 overflow-y-auto custom-scrollbar">
-            <h2 className="text-2xl font-bold mb-4 bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent">
+            <h2 className="text-2xl font-bold mb-4 bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent shrink-0">
                 City Generator
             </h2>
+
+            {/* Map Settings */}
+            <CollapsibleCard title="Map Settings" color="blue">
+                <div className="flex gap-2 mb-2">
+                    <div className="flex-1">
+                        <label className="text-sm text-gray-500 mb-1 block">Width (m)</label>
+                        <input
+                            type="number"
+                            value={params.width}
+                            onChange={(e) => handleChange('width', parseInt(e.target.value) || 1000)}
+                            className="w-full bg-gray-800 border border-gray-700 text-white rounded px-2 py-2 text-sm focus:border-cyan-500 outline-none"
+                        />
+                    </div>
+                    <div className="flex-1">
+                        <label className="text-sm text-gray-500 mb-1 block">Height (m)</label>
+                        <input
+                            type="number"
+                            value={params.height}
+                            onChange={(e) => handleChange('height', parseInt(e.target.value) || 1000)}
+                            className="w-full bg-gray-800 border border-gray-700 text-white rounded px-2 py-2 text-sm focus:border-cyan-500 outline-none"
+                        />
+                    </div>
+                </div>
+                <div className="text-[10px] text-gray-500 text-center mb-1">
+                    Warning: Changing size resets the map
+                </div>
+            </CollapsibleCard>
 
             {/* City Settings */}
             <CollapsibleCard title="City Settings" color="purple">
                 <Slider
-                    label="City Size"
+                    label="Inner City Size"
                     value={params.citySize * 100}
-                    min={20} max={100} step={5}
-                    onChange={(v) => handleChange('citySize', v / 100)}
+                    min={5} max={100} step={5}
+                    onChange={(v) => {
+                        const newSize = v / 100;
+                        handleChange('citySize', newSize);
+                        // Trigger regeneration after a small delay to allow state to settle
+                        // Note: A better approach would be to debounce this or use useEffect in App.tsx
+                        // But for direct UI feedback this works if the parent handles it correctly.
+                        // Actually, since handleChange updates parent state, we should pass the NEW param value
+                        // but onGenerateCityBoundary reads from the ref which tracks params.
+                        // We need to ensure the ref is updated.
+                        // The App.tsx updates the ref in useEffect [params].
+                        // So immediate call might be too fast.
+                        // Let's use a timeout.
+                        setTimeout(() => onGenerateCityBoundary(), 50);
+                    }}
                     color="orange"
                     unit="%"
                 />
@@ -232,6 +278,43 @@ export const ControlPanel = ({
                 <SmallButton onClick={onGenerateCityBoundary} variant="primary" className="w-full mt-2">
                     Generate City Limits
                 </SmallButton>
+                <SmallButton
+                    onClick={onPlaceCenter}
+                    disabled={isPlacingCenter}
+                    className={`w-full mt-2 ${isPlacingCenter ? 'bg-amber-600' : ''}`}
+                    variant={isPlacingCenter ? 'danger' : 'default'}
+                >
+                    {isPlacingCenter ? 'Click on Map...' : 'Place City Center'}
+                </SmallButton>
+
+                <div className="mt-2 border-t border-white/5 pt-2">
+                    <Slider
+                        label="Outer City Falloff"
+                        value={params.outerCityFalloff * 100}
+                        min={0} max={50} step={5}
+                        onChange={(v) => handleChange('outerCityFalloff', v / 100)}
+                        color="blue"
+                        unit="%"
+                    />
+                    <Slider
+                        label="Gradient Randomness"
+                        value={params.outerCityRandomness * 100}
+                        min={0} max={100} step={5}
+                        onChange={(v) => handleChange('outerCityRandomness', v / 100)}
+                        color="purple"
+                        unit="%"
+                    />
+                    <Toggle
+                        label="Show Gradient"
+                        checked={params.showCityLimitGradient}
+                        onChange={() => handleChange('showCityLimitGradient', !params.showCityLimitGradient)}
+                        color="blue"
+                    />
+                </div>
+            </CollapsibleCard>
+
+            {/* Water Settings */}
+            <CollapsibleCard title="Water" color="cyan">
                 <Select
                     label="Water Feature"
                     value={params.waterFeature}
@@ -243,13 +326,23 @@ export const ControlPanel = ({
                     ]}
                     onChange={(v) => handleChange('waterFeature', v)}
                 />
+                {params.waterFeature === 'RIVER' && (
+                    <Slider
+                        label="River Width"
+                        value={params.riverWidth}
+                        min={10} max={100} step={5}
+                        onChange={(v) => handleChange('riverWidth', v)}
+                        color="cyan"
+                        unit="m"
+                    />
+                )}
                 <SmallButton onClick={onGenerateWater} variant="primary" className="w-full mt-2">
                     Generate Water
                 </SmallButton>
             </CollapsibleCard>
 
             {/* Road Generation */}
-            <CollapsibleCard title="Roads" color="cyan">
+            <CollapsibleCard title="Roads" color="green">
                 <Select
                     label="Strategy"
                     value={params.strategy}
@@ -279,13 +372,13 @@ export const ControlPanel = ({
                 </SmallButton>
             </CollapsibleCard>
 
-            {/* Buildings */}
-            <CollapsibleCard title="Buildings" color="amber">
-                {/* Plots Row */}
-                <div className="flex items-center gap-2 mb-3 pb-3 border-b border-white/5">
-                    <span className="text-sm text-gray-400 flex-shrink-0">Plots</span>
+            {/* Plots */}
+            <CollapsibleCard title="Plots" color="amber">
+                <div className="flex items-center gap-2 mb-3">
+                    <span className="text-sm text-gray-400 flex-shrink-0">Count:</span>
                     <span className="text-sm font-mono text-amber-400 bg-amber-500/10 px-2 py-1 rounded">{plotCount}</span>
-                    <div className="flex-1" />
+                </div>
+                <div className="grid grid-cols-2 gap-2 mb-3">
                     <SmallButton onClick={onGeneratePlots} variant="primary" className="!bg-amber-900/40 !text-amber-400 !border-amber-500/30 hover:!bg-amber-800/50">
                         Generate
                     </SmallButton>
@@ -293,13 +386,34 @@ export const ControlPanel = ({
                         Clear
                     </SmallButton>
                 </div>
-
                 <Toggle
                     label="Show Plots"
                     checked={showPlots}
                     onChange={onTogglePlots}
                     color="amber"
                 />
+            </CollapsibleCard>
+
+            {/* Buildings */}
+            <CollapsibleCard title="Buildings" color="orange">
+                <div className="flex items-center gap-2 mb-3">
+                    <span className="text-sm text-gray-400 flex-shrink-0">Count:</span>
+                    <span className="text-sm font-mono text-amber-400 bg-amber-500/10 px-2 py-1 rounded">{buildingCount}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                    <SmallButton
+                        onClick={onGenerateBuildings}
+                        variant="primary"
+                        disabled={isBuildingGenerating || !hasPlots}
+                        className="w-full !bg-amber-900/40 !text-amber-400 !border-amber-500/30 hover:!bg-amber-800/50"
+                    >
+                        {isBuildingGenerating ? '...' : 'Generate'}
+                    </SmallButton>
+                    <SmallButton onClick={onClearBuildings} disabled={!hasBuildings || isBuildingGenerating} className="w-full">
+                        Clear
+                    </SmallButton>
+                </div>
+
                 <Slider
                     label="Min Building Area"
                     value={params.minBuildingArea}
@@ -383,12 +497,12 @@ export const ControlPanel = ({
             {/* Reset All */}
             <button
                 onClick={onReset}
-                className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-semibold text-base text-gray-300 transition-colors border border-white/5 mt-auto"
+                className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-semibold text-base text-gray-300 transition-colors border border-white/5 mt-auto shrink-0"
             >
                 RESET ALL
             </button>
 
-            <div className="mt-3 text-xs text-gray-600 font-mono text-center">
+            <div className="mt-3 text-xs text-gray-600 font-mono text-center shrink-0">
                 Pan: Drag • Zoom: Scroll
             </div>
         </div>

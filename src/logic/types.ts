@@ -50,6 +50,11 @@ export interface GenerationParams {
     waterFeature: WaterFeature;
     citySize: number; // 0-1, percentage of map the city should fill
     hardCityLimit: boolean; // true = roads stop at boundary, false = gradual density decline
+    outerCityFalloff: number; // 0-1, additional area for outer city gradient (relative to map size)
+    outerCityRandomness: number; // 0-1, how much noise affects the gradient falloff
+    showCityLimitGradient: boolean; // Debug visualization
+    // Water params
+    riverWidth: number; // Width of the main river in meters
     // Building generation params (area-based)
     minBuildingArea: number; // Minimum building area in square pixels
     maxBuildingArea: number; // Maximum building area before splitting

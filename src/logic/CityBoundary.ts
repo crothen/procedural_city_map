@@ -6,6 +6,7 @@ export class CityBoundary {
     cityCenter: Point = { x: 0, y: 0 };
     cityRadius: number = 0;
     cityBoundary: Point[] = [];
+    private manualCenter: Point | null = null;
 
     private params: GenerationParams;
     private waterGenerator: WaterGenerator;
@@ -21,14 +22,30 @@ export class CityBoundary {
 
     reset() {
         this.cityBoundary = [];
+        // Do NOT clear manualCenter here, it should be sticky explicitly.
+        // this.manualCenter = null; 
+    }
+
+    fullReset() {
+        this.cityBoundary = [];
+        this.manualCenter = null;
     }
 
     /**
      * Initialize city center and boundary.
+     * @param overrideCenter Optional manual center point.
      */
-    initialize() {
-        const startPoint = this.findValidStartPoint();
-        this.cityCenter = { x: startPoint.x, y: startPoint.y };
+    initialize(overrideCenter?: Point) {
+        if (overrideCenter) {
+            this.manualCenter = { x: overrideCenter.x, y: overrideCenter.y };
+            this.cityCenter = { x: overrideCenter.x, y: overrideCenter.y };
+        } else if (this.manualCenter) {
+            // Respect previously set manual center
+            this.cityCenter = { x: this.manualCenter.x, y: this.manualCenter.y };
+        } else {
+            const startPoint = this.findValidStartPoint();
+            this.cityCenter = { x: startPoint.x, y: startPoint.y };
+        }
 
         const maxPossibleRadius = Math.min(this.params.width, this.params.height) / 2;
         this.cityRadius = maxPossibleRadius * this.params.citySize;
@@ -51,6 +68,58 @@ export class CityBoundary {
         return pointInPolygon(point, this.cityBoundary);
     }
 
+    getUrbanDensity(point: Point): number {
+        if (this.cityBoundary.length < 3) return 0;
+
+        // 1. If inside actual city boundary, density is 1.0
+        if (this.isPointInsideCity(point)) {
+            return 1.0;
+        }
+
+        // 2. If outside, calculate distance to nearest boundary point
+        const dist = this.distanceToNearestBoundaryPoint(point);
+        const { width, height, outerCityFalloff, outerCityRandomness } = this.params;
+
+        // Falloff distance based on map size
+        const maxDim = Math.max(width, height);
+        const falloffRange = maxDim * outerCityFalloff;
+
+        if (falloffRange <= 0) return 0;
+
+        // Normalized distance (0 at boundary, 1 at max range)
+        const normalizedDist = Math.min(1, dist / falloffRange);
+
+        // 3. Coherent Noise (Value Noise) for organic patches
+        // Frequency: Lower = larger patches
+        const freq = 0.005;
+        const noiseVal = this.noise2D(point.x * freq, point.y * freq);
+        // Normalize noise from -1..1 to 0..1
+        const n01 = (noiseVal + 1) * 0.5;
+
+        // 4. Combine Density
+        // Linear falloff: 1.0 -> 0.0
+        const baseDensity = 1.0 - normalizedDist;
+
+        // Apply noise influence based on randomness slider
+        // to ensure it starts at 1.0, we fade in the randomness effect over the first few percent of distance
+        // normalizedDist 0.0 -> noiseMix 0.0 (Pure gradient)
+        // normalizedDist ramps up quickly -> noiseMix 1.0 (Full noise influence)
+        const startProtection = Math.min(1.0, normalizedDist * 10.0); // 10% ramp up
+        const effectiveRandomness = outerCityRandomness * startProtection;
+
+        // When effectiveRandomness is 0: density = baseDensity (perfect gradient)
+        // When effectiveRandomness is 1: density = baseDensity * n01
+        const influence = 1.0 - (effectiveRandomness * (1.0 - n01));
+
+        // Combine: density reduces with distance AND with noise
+        let density = baseDensity * influence;
+
+        // Optional: Sharpen the falloff slightly to define edges better
+        density = Math.pow(density, 1.2);
+
+        return Math.max(0, Math.min(1, density));
+    }
+
     /**
      * Calculate distance from point to nearest city boundary point.
      */
@@ -71,7 +140,12 @@ export class CityBoundary {
      * Generate an organic, non-circular city boundary with possible suburban protrusions.
      */
     generate() {
-        const { width, height } = this.params;
+        const { width, height, citySize } = this.params;
+
+        // Recalculate radius based on latest params
+        const maxPossibleRadius = Math.min(width, height) / 2;
+        this.cityRadius = maxPossibleRadius * citySize;
+
         const numPoints = 24;
         const points: Point[] = [];
 
@@ -205,10 +279,11 @@ export class CityBoundary {
         const idealDistance = segmentLength * 2;
         const maxDistance = segmentLength * 5;
 
+        const maxSamples = 200;
         let bestPoint: Point | null = null;
         let bestScore = -1;
 
-        for (let i = 0; i < 200; i++) {
+        for (let i = 0; i < maxSamples; i++) {
             const point = {
                 x: width * 0.15 + Math.random() * width * 0.7,
                 y: height * 0.15 + Math.random() * height * 0.7
@@ -261,5 +336,43 @@ export class CityBoundary {
         }
 
         return count;
+    }
+
+    // --- Simple Value Noise Implementation for getUrbanDensity ---
+
+    private noise2D(x: number, y: number): number {
+        const X = Math.floor(x);
+        const Y = Math.floor(y);
+        const xf = x - X;
+        const yf = y - Y;
+
+        const u = this.fade(xf);
+        const v = this.fade(yf);
+
+        const aa = this.hash(X, Y);
+        const ab = this.hash(X, Y + 1);
+        const ba = this.hash(X + 1, Y);
+        const bb = this.hash(X + 1, Y + 1);
+
+        const x1 = this.lerp(aa, ba, u);
+        const x2 = this.lerp(ab, bb, u);
+
+        return this.lerp(x1, x2, v);
+    }
+
+    private fade(t: number): number {
+        return t * t * t * (t * (t * 6 - 15) + 10);
+    }
+
+    private lerp(a: number, b: number, t: number): number {
+        return a + t * (b - a);
+    }
+
+    // Pseudo-random hash returning -1 to 1
+    private hash(x: number, y: number): number {
+        let h = Math.imul(x ^ 0x12345678, 0x12345678);
+        h = Math.imul(h ^ y, 0x87654321);
+        h = Math.imul(h ^ (h >>> 13), 0x55555555);
+        return ((h >>> 0) / 4294967296) * 2 - 1;
     }
 }

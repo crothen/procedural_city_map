@@ -47,6 +47,10 @@ export class BuildingGenerator {
     this.blocks = blocks as Plot[];
   }
 
+  updateParams(params: GenerationParams) {
+    this.params = params;
+  }
+
   updateRefs(nodes: Map<string, Node>, edges: Edge[], blocks: Block[]) {
     this.nodes = nodes;
     this.edges = edges;

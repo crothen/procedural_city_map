@@ -1,788 +1,597 @@
-import type { Point, WaterBody, GenerationParams } from './types';
-import { pointInPolygon, catmullRom } from './geometry';
+import type { Point, WaterBody, GenerationParams } from "./types";
+import { pointInPolygon, catmullRom } from "./geometry";
+
+class SimpleNoise {
+  private perm: number[] = [];
+  constructor(seed: number = Math.random()) {
+    for (let i = 0; i < 256; i++) this.perm[i] = i;
+    for (let i = 255; i > 0; i--) {
+      const j = Math.floor((seed * (i + 1) * 374.2) % (i + 1));
+      [this.perm[i], this.perm[j]] = [this.perm[j], this.perm[i]];
+    }
+    this.perm = [...this.perm, ...this.perm];
+  }
+  get(x: number): number {
+    const X = Math.floor(x) & 255;
+    const xf = x - Math.floor(x);
+    const u = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
+    const lerp = (t: number, a: number, b: number) => a + t * (b - a);
+    const grad = (h: number, x: number) => ((h & 1) === 0 ? x : -x);
+    return lerp(u(xf), grad(this.perm[X], xf), grad(this.perm[X + 1], xf - 1));
+  }
+  fbm(x: number, octaves: number): number {
+    let t = 0,
+      a = 1,
+      f = 1,
+      max = 0;
+    for (let i = 0; i < octaves; i++) {
+      t += this.get(x * f) * a;
+      max += a;
+      a *= 0.5;
+      f *= 2.0;
+    }
+    return t / max;
+  }
+}
 
 export class WaterGenerator {
-    waterBodies: WaterBody[] = [];
-    private params: GenerationParams;
+  waterBodies: WaterBody[] = [];
+  private params: GenerationParams;
+  private noise: SimpleNoise;
+  private mainRiverSpine: Point[] = []; // Store for collision checks
 
-    constructor(params: GenerationParams) {
-        this.params = params;
+  constructor(params: GenerationParams) {
+    this.params = params;
+    this.noise = new SimpleNoise();
+  }
+
+  updateParams(params: GenerationParams) {
+    this.params = params;
+    this.noise = new SimpleNoise(Math.random());
+  }
+
+  reset() {
+    this.waterBodies = [];
+    this.mainRiverSpine = [];
+    this.noise = new SimpleNoise(Math.random());
+  }
+
+  isPointInWater(point: Point): boolean {
+    for (const water of this.waterBodies) {
+      if (pointInPolygon(point, water.points)) return true;
+    }
+    return false;
+  }
+
+  generate() {
+    const { waterFeature } = this.params;
+    if (waterFeature === "NONE") return;
+
+    this.noise = new SimpleNoise(Math.random());
+
+    if (waterFeature === "RIVER") {
+      this.generateRiver();
+    } else if (waterFeature === "COAST") {
+      this.generateCoast();
+      if (Math.random() < 0.5) this.generateRiverIntoWater();
+    } else if (waterFeature === "LAKE") {
+      this.generateLake();
+      if (Math.random() < 0.6) this.generateRiverIntoWater();
+    }
+  }
+
+  // ========================================================================
+  // ROBUST RIVER GENERATION
+  // ========================================================================
+
+  private generateRiver() {
+    const { width, height, riverWidth } = this.params;
+    const mainWidth = riverWidth * (0.8 + Math.random() * 0.4);
+
+    const horizontal = Math.random() > 0.5;
+    let start: Point, end: Point;
+    // Padding: -150 ensures the start/end is well off-screen
+    const pad = -150;
+
+    if (horizontal) {
+      const startY = height * (0.2 + Math.random() * 0.6);
+      const endY = height * (0.2 + Math.random() * 0.6);
+      if (Math.random() > 0.5) {
+        start = { x: pad, y: startY };
+        end = { x: width - pad, y: endY };
+      } else {
+        start = { x: width - pad, y: startY };
+        end = { x: pad, y: endY };
+      }
+    } else {
+      const startX = width * (0.2 + Math.random() * 0.6);
+      const endX = width * (0.2 + Math.random() * 0.6);
+      if (Math.random() > 0.5) {
+        start = { x: startX, y: pad };
+        end = { x: endX, y: height - pad };
+      } else {
+        start = { x: startX, y: height - pad };
+        end = { x: endX, y: pad };
+      }
     }
 
-    updateParams(params: GenerationParams) {
-        this.params = params;
+    // Generate Main Spine
+    let spine = this.generateNaturalPath(start, end, 15);
+    spine = this.resamplePolyline(spine, 10); // 10px spacing for efficiency
+    spine = this.smoothPoints(spine, 4);
+    this.mainRiverSpine = spine;
+
+    // Generate Geometry
+    this.createBraidedRiver(spine, mainWidth);
+
+    // Tributaries
+    const numTribs = 1 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < numTribs; i++) {
+      this.addNaturalTributary(spine, mainWidth);
+    }
+  }
+
+  private generateRiverIntoWater() {
+    const { width, height, riverWidth } = this.params;
+    if (this.waterBodies.length === 0) return;
+
+    const targetWater = this.waterBodies[0];
+    const targetIdx = Math.floor(Math.random() * targetWater.points.length);
+    const endPoint = targetWater.points[targetIdx];
+    const center = this.getPolygonCentroid(targetWater.points);
+
+    const startPoint = this.getFurthestMapEdge(endPoint, width, height);
+
+    const dx = center.x - endPoint.x;
+    const dy = center.y - endPoint.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const adjustedEnd = {
+      x: endPoint.x + (dx / len) * 100, // Push deep into water
+      y: endPoint.y + (dy / len) * 100,
+    };
+
+    let spine = this.generateNaturalPath(startPoint, adjustedEnd, 15);
+    spine = this.resamplePolyline(spine, 10);
+    spine = this.smoothPoints(spine, 3);
+    this.mainRiverSpine = spine;
+
+    this.createBraidedRiver(spine, riverWidth);
+  }
+
+  private createBraidedRiver(spine: Point[], baseWidth: number) {
+    const n = spine.length;
+    const splitChance = n > 50 ? 0.4 : 0;
+
+    if (Math.random() > splitChance) {
+      this.waterBodies.push({
+        type: "RIVER",
+        points: this.extrudePolyline(spine, baseWidth),
+      });
+      return;
     }
 
-    reset() {
-        this.waterBodies = [];
+    const margin = Math.floor(n * 0.2);
+    const duration = Math.floor(n * 0.3);
+    const startIdx =
+      margin + Math.floor(Math.random() * (n - margin * 2 - duration));
+    const endIdx = startIdx + duration;
+
+    const leftBranchSpine: Point[] = [];
+    const rightBranchSpine: Point[] = [];
+
+    for (let i = 0; i < n; i++) {
+      const p = spine[i];
+      if (i >= startIdx && i <= endIdx) {
+        const t = (i - startIdx) / duration;
+        const swell = Math.sin(t * Math.PI) * (baseWidth * 1.5);
+
+        const next = spine[Math.min(n - 1, i + 1)];
+        const prev = spine[Math.max(0, i - 1)];
+        let nx = -(next.y - prev.y);
+        let ny = next.x - prev.x;
+        const l = Math.hypot(nx, ny) || 1;
+        nx /= l;
+        ny /= l;
+
+        leftBranchSpine.push({ x: p.x + nx * swell, y: p.y + ny * swell });
+        rightBranchSpine.push({ x: p.x - nx * swell, y: p.y - ny * swell });
+      } else {
+        leftBranchSpine.push(p);
+        rightBranchSpine.push(p);
+      }
     }
 
-    /**
-     * Check if a point is inside any water body.
-     */
-    isPointInWater(point: Point): boolean {
-        for (const water of this.waterBodies) {
-            if (pointInPolygon(point, water.points)) {
-                return true;
-            }
-        }
-        return false;
+    const widthPerBranch = baseWidth * 0.6;
+    this.waterBodies.push({
+      type: "RIVER",
+      points: this.extrudePolyline(
+        this.smoothPoints(leftBranchSpine, 3),
+        widthPerBranch
+      ),
+    });
+    this.waterBodies.push({
+      type: "RIVER",
+      points: this.extrudePolyline(
+        this.smoothPoints(rightBranchSpine, 3),
+        widthPerBranch
+      ),
+    });
+  }
+
+  private extrudePolyline(line: Point[], baseWidth: number): Point[] {
+    const left: Point[] = [];
+    const right: Point[] = [];
+    const n = line.length;
+
+    // 1. Calculate Widths
+    let widths: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const noise = this.noise.fbm(i * 0.05, 2);
+      const w = baseWidth * (1.0 + noise * 0.5);
+      widths.push(w);
+    }
+    widths = this.smoothArray(widths, 4);
+
+    // 2. Extrude
+    for (let i = 0; i < n; i++) {
+      const p = line[i];
+
+      // Smoothing window for normals
+      const w = 2;
+      const pPrev = line[Math.max(0, i - w)];
+      const pNext = line[Math.min(n - 1, i + w)];
+
+      let dx = pNext.x - pPrev.x;
+      let dy = pNext.y - pPrev.y;
+      let len = Math.hypot(dx, dy) || 1;
+
+      let nx = -dy / len;
+      let ny = dx / len;
+
+      const half = widths[i] / 2;
+      left.push({ x: p.x + nx * half, y: p.y + ny * half });
+      right.push({ x: p.x - nx * half, y: p.y - ny * half });
     }
 
-    /**
-     * Generate water features based on params.
-     * Can combine features: rivers can flow into lakes or coasts.
-     */
-    generate() {
-        const { waterFeature } = this.params;
+    // **CRITICAL FIX**: Do NOT clamp points here. Allow them to go off-screen.
+    // This solves the "visible endings" issue.
+    return [...left, ...right.reverse()];
+  }
 
-        if (waterFeature === 'NONE') return;
+  // --- Path Generation ---
 
-        if (waterFeature === 'RIVER') {
-            this.generateRiver();
-        } else if (waterFeature === 'COAST') {
-            this.generateCoast();
-            // 50% chance to also have a river flowing into the sea
-            if (Math.random() < 0.5) {
-                this.generateRiverIntoWater();
-            }
-        } else if (waterFeature === 'LAKE') {
-            this.generateLake();
-            // 60% chance to have a river flowing into or out of the lake
-            if (Math.random() < 0.6) {
-                this.generateRiverIntoWater();
-            }
-        }
+  private generateNaturalPath(
+    start: Point,
+    end: Point,
+    segments: number
+  ): Point[] {
+    const points: Point[] = [];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const dist = Math.hypot(dx, dy);
+    const nx = -dy / dist;
+    const ny = dx / dist;
+
+    const seed = Math.random() * 1000;
+    const amp = dist * 0.2;
+
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const bx = start.x + dx * t;
+      const by = start.y + dy * t;
+
+      const envelope = Math.sin(t * Math.PI);
+      const noise = this.noise.fbm(t * 3 + seed, 2);
+
+      const offset = noise * amp * envelope;
+      points.push({ x: bx + nx * offset, y: by + ny * offset });
     }
 
-    /**
-     * Generate a river that flows into existing water (lake or coast).
-     * River endpoint extends INTO the water body, pointing towards its center.
-     */
-    private generateRiverIntoWater() {
-        const { width, height } = this.params;
+    return this.interpolateCurve(points, 4);
+  }
 
-        if (this.waterBodies.length === 0) return;
+  private addNaturalTributary(parentSpine: Point[], parentWidth: number) {
+    if (parentSpine.length < 20) return;
 
-        // Find a point on an existing water body to connect to
-        const targetWater = this.waterBodies[0];
-        const waterPoints = targetWater.points;
+    // Try up to 3 times to find a valid non-crossing path
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const idx = Math.floor(parentSpine.length * (0.2 + Math.random() * 0.6));
+      const joinPt = parentSpine[idx];
 
-        // Calculate the center of the water body
-        let waterCenterX = 0;
-        let waterCenterY = 0;
-        for (const p of waterPoints) {
-            waterCenterX += p.x;
-            waterCenterY += p.y;
-        }
-        waterCenterX /= waterPoints.length;
-        waterCenterY /= waterPoints.length;
+      const prev = parentSpine[Math.max(0, idx - 5)];
+      const next = parentSpine[Math.min(parentSpine.length - 1, idx + 5)];
+      const ang = Math.atan2(next.y - prev.y, next.x - prev.x);
 
-        // Pick a random point on the water edge
-        const targetIdx = Math.floor(Math.random() * waterPoints.length);
-        const edgePoint = waterPoints[targetIdx];
+      const side = Math.random() > 0.5 ? 1 : -1;
+      const rayAng = ang + (Math.PI / 2) * side + (Math.random() - 0.5) * 0.6; // +/- 30 deg spread
 
-        // Calculate direction from edge point towards water center
-        const toCenterDx = waterCenterX - edgePoint.x;
-        const toCenterDy = waterCenterY - edgePoint.y;
-        const toCenterLen = Math.sqrt(toCenterDx * toCenterDx + toCenterDy * toCenterDy) || 1;
-        const toCenterNormX = toCenterDx / toCenterLen;
-        const toCenterNormY = toCenterDy / toCenterLen;
+      const startPt = this.findEdgeIntersection(joinPt, rayAng);
+      if (!startPt) continue;
 
-        // Extend the target point INSIDE the water (30-60 pixels past the edge)
-        const extensionIntoWater = 30 + Math.random() * 30;
-        const targetPoint = {
-            x: edgePoint.x + toCenterNormX * extensionIntoWater,
-            y: edgePoint.y + toCenterNormY * extensionIntoWater
-        };
+      // Generate path
+      let spine = this.generateTributaryPath(startPt, joinPt, 15);
 
-        // River flows from a map edge to this water point
-        const riverWidth = 30 + Math.random() * 20; // Slightly narrower than main rivers
+      // **COLLISION CHECK**: Does this new spine cross the main river?
+      if (this.spinesIntersect(spine, this.mainRiverSpine)) {
+        continue; // Try again
+      }
 
-        // Determine which edge to start from - opposite side from the water
-        let startPoint: Point;
-        const margin = 50;
+      spine = this.resamplePolyline(spine, 5);
+      spine = this.smoothPoints(spine, 3);
 
-        // Start from the edge that's furthest from the water center
-        const distToLeft = waterCenterX;
-        const distToRight = width - waterCenterX;
-        const distToTop = waterCenterY;
-        const distToBottom = height - waterCenterY;
-
-        // Pick a starting edge based on which is furthest from water
-        const maxDist = Math.max(distToLeft, distToRight, distToTop, distToBottom);
-
-        if (maxDist === distToRight) {
-            startPoint = { x: width, y: margin + Math.random() * (height - margin * 2) };
-        } else if (maxDist === distToLeft) {
-            startPoint = { x: 0, y: margin + Math.random() * (height - margin * 2) };
-        } else if (maxDist === distToBottom) {
-            startPoint = { x: margin + Math.random() * (width - margin * 2), y: height };
-        } else {
-            startPoint = { x: margin + Math.random() * (width - margin * 2), y: 0 };
-        }
-
-        // Generate control points for the river path using random walk
-        const numPoints = 10 + Math.floor(Math.random() * 5);
-        const controlPoints: Point[] = [];
-
-        // Calculate flow direction
-        const flowDx = targetPoint.x - startPoint.x;
-        const flowDy = targetPoint.y - startPoint.y;
-        const flowLen = Math.sqrt(flowDx * flowDx + flowDy * flowDy) || 1;
-        const perpX = -flowDy / flowLen;
-        const perpY = flowDx / flowLen;
-
-        // Use velocity-based random walk for organic meander
-        const maxMeander = 50 + Math.random() * 60;
-        let perpVelocity = (Math.random() - 0.5) * 20;
-        let perpAcceleration = 0;
-        let perpOffset = 0;
-
-        for (let i = 0; i < numPoints; i++) {
-            const t = i / (numPoints - 1);
-
-            // Base interpolation
-            const baseX = startPoint.x + (targetPoint.x - startPoint.x) * t;
-            const baseY = startPoint.y + (targetPoint.y - startPoint.y) * t;
-
-            // Random walk meander
-            if (Math.random() < 0.3) {
-                perpAcceleration = (Math.random() - 0.5) * 15;
-            } else {
-                perpAcceleration += (Math.random() - 0.5) * 10;
-            }
-
-            perpVelocity += perpAcceleration;
-            perpVelocity *= 0.7;
-
-            const maxVel = maxMeander / 4;
-            perpVelocity = Math.max(-maxVel, Math.min(maxVel, perpVelocity));
-
-            perpOffset += perpVelocity;
-            perpOffset = Math.max(-maxMeander, Math.min(maxMeander, perpOffset));
-
-            // Reduce meander near connection points for smoother join
-            const edgeFactor = Math.min(t * 5, (1 - t) * 5, 1);
-            const totalMeander = perpOffset * edgeFactor;
-
-            controlPoints.push({
-                x: baseX + perpX * totalMeander,
-                y: baseY + perpY * totalMeander
-            });
-        }
-
-        // Interpolate and create polygon
-        if (controlPoints.length >= 3) {
-            const smoothRiver = this.interpolateRiverCurve(controlPoints);
-            const riverPolygon = this.riverToPolygon(smoothRiver, riverWidth);
-            this.waterBodies.push({ type: 'RIVER', points: riverPolygon });
-        }
+      this.waterBodies.push({
+        type: "RIVER",
+        points: this.extrudePolyline(spine, parentWidth * 0.4),
+      });
+      break; // Success
     }
+  }
 
-    /**
-     * Generate a meandering river across the map with natural curves and optional branching.
-     */
-    private generateRiver() {
-        const { width, height } = this.params;
+  /**
+   * Specialized path generator for tributaries.
+   * Damps noise to ZERO at the end to force a straight entry.
+   */
+  private generateTributaryPath(
+    start: Point,
+    end: Point,
+    segments: number
+  ): Point[] {
+    const points: Point[] = [];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const dist = Math.hypot(dx, dy);
+    const nx = -dy / dist;
+    const ny = dx / dist;
+    const seed = Math.random() * 1000;
 
-        // Consistent river width for this map (40-70 pixels)
-        const baseRiverWidth = 40 + Math.random() * 30;
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const bx = start.x + dx * t;
+      const by = start.y + dy * t;
 
-        // Decide river orientation and create control points
-        const horizontal = Math.random() > 0.5;
+      // Envelope: 0 at start, peak in middle, 0 at end
+      // PLUS: Force 0 for the last 15% (t > 0.85) to ensure straight entry
+      let envelope = Math.sin(t * Math.PI);
+      if (t > 0.85) envelope = 0;
+      else if (t > 0.7) envelope *= (0.85 - t) / 0.15; // Fade out quickly
 
-        // Generate the main river centerline with more natural curves
-        const controlPoints = this.generateRiverControlPoints(horizontal, width, height, baseRiverWidth);
+      const noise = this.noise.fbm(t * 4 + seed, 2);
+      const offset = noise * (dist * 0.15) * envelope;
 
-        // Interpolate to create smooth curve
-        const smoothCenterline = this.interpolateRiverCurve(controlPoints);
-
-        // Convert to polygon
-        const mainRiverPolygon = this.riverToPolygon(smoothCenterline, baseRiverWidth);
-        this.waterBodies.push({ type: 'RIVER', points: mainRiverPolygon });
-
-        // Add tributaries (inflows that don't rejoin)
-        const numTributaries = Math.floor(Math.random() * 3); // 0-2 tributaries
-        for (let i = 0; i < numTributaries; i++) {
-            this.addTributary(smoothCenterline, baseRiverWidth, horizontal);
-        }
-
-        // Chance for river branching that rejoins (creates island)
-        if (Math.random() < 0.25) {
-            this.addRiverIsland(smoothCenterline, baseRiverWidth, horizontal);
-        }
+      points.push({ x: bx + nx * offset, y: by + ny * offset });
     }
+    return points;
+  }
 
-    /**
-     * Generate control points for a natural river curve using velocity-based random walk.
-     */
-    private generateRiverControlPoints(horizontal: boolean, width: number, height: number, riverWidth: number): Point[] {
-        const points: Point[] = [];
+  // --- Helpers ---
 
-        // Width factor: 0 = narrow (30px), 1 = wide (70px)
-        const widthFactor = Math.max(0, Math.min(1, (riverWidth - 30) / 40));
+  private spinesIntersect(spineA: Point[], spineB: Point[]): boolean {
+    // Simple bounding box check first could be added here for perf
+    // Detailed check:
+    // Skip last few segments of A because they are DESIGNED to touch B
+    const limitA = spineA.length - 5;
 
-        const numControlPoints = Math.floor(18 + (1 - widthFactor) * 12 + Math.random() * 8);
-        const baseAmplitude = 120 + widthFactor * 250;
-        const maxMeanderAmplitude = baseAmplitude + Math.random() * 150;
-        const directionChangeChance = 0.15 + (1 - widthFactor) * 0.35;
-        const accelMagnitude = 25 + (1 - widthFactor) * 45;
-        const accelVariation = 15 + (1 - widthFactor) * 30;
-        const curveTendency = 0.88 + (1 - widthFactor) * 0.07;
-        const bendChance = 0.12 + (1 - widthFactor) * 0.18;
-        const bendMagnitude = 0.4 + widthFactor * 0.3;
-        const margin = riverWidth * 3;
-
-        if (horizontal) {
-            let y = height * (0.35 + Math.random() * 0.3);
-            let yVelocity = (Math.random() - 0.5) * (35 + (1 - widthFactor) * 25);
-            let yAcceleration = 0;
-
-            for (let i = 0; i <= numControlPoints; i++) {
-                const t = i / numControlPoints;
-                const x = width * t;
-
-                if (Math.random() < directionChangeChance) {
-                    yAcceleration = (Math.random() - 0.5) * accelMagnitude;
-                } else {
-                    yAcceleration += (Math.random() - 0.5) * accelVariation;
-                }
-
-                yVelocity += yAcceleration;
-                yVelocity *= curveTendency;
-
-                const maxVelocity = maxMeanderAmplitude / (2.5 - widthFactor);
-                yVelocity = Math.max(-maxVelocity, Math.min(maxVelocity, yVelocity));
-
-                y += yVelocity;
-
-                if (Math.random() < bendChance) {
-                    const bendSize = (Math.random() - 0.5) * maxMeanderAmplitude * bendMagnitude;
-                    y += bendSize;
-                    yVelocity += bendSize * 0.4;
-                }
-
-                const centerY = height / 2;
-                const distFromCenter = y - centerY;
-                const maxDist = (height / 2) - margin;
-                if (Math.abs(distFromCenter) > maxDist * 0.6) {
-                    const pushback = -distFromCenter * 0.2;
-                    yVelocity += pushback;
-                }
-
-                y = Math.max(margin, Math.min(height - margin, y));
-                points.push({ x, y });
-            }
-        } else {
-            let x = width * (0.35 + Math.random() * 0.3);
-            let xVelocity = (Math.random() - 0.5) * (35 + (1 - widthFactor) * 25);
-            let xAcceleration = 0;
-
-            for (let i = 0; i <= numControlPoints; i++) {
-                const t = i / numControlPoints;
-                const y = height * t;
-
-                if (Math.random() < directionChangeChance) {
-                    xAcceleration = (Math.random() - 0.5) * accelMagnitude;
-                } else {
-                    xAcceleration += (Math.random() - 0.5) * accelVariation;
-                }
-
-                xVelocity += xAcceleration;
-                xVelocity *= curveTendency;
-
-                const maxVelocity = maxMeanderAmplitude / (2.5 - widthFactor);
-                xVelocity = Math.max(-maxVelocity, Math.min(maxVelocity, xVelocity));
-
-                x += xVelocity;
-
-                if (Math.random() < bendChance) {
-                    const bendSize = (Math.random() - 0.5) * maxMeanderAmplitude * bendMagnitude;
-                    x += bendSize;
-                    xVelocity += bendSize * 0.4;
-                }
-
-                const centerX = width / 2;
-                const distFromCenter = x - centerX;
-                const maxDist = (width / 2) - margin;
-                if (Math.abs(distFromCenter) > maxDist * 0.6) {
-                    const pushback = -distFromCenter * 0.2;
-                    xVelocity += pushback;
-                }
-
-                x = Math.max(margin, Math.min(width - margin, x));
-                points.push({ x, y });
-            }
-        }
-
-        return points;
+    for (let i = 0; i < limitA; i++) {
+      for (let j = 0; j < spineB.length - 1; j++) {
+        if (
+          this.getLineIntersection(
+            spineA[i],
+            spineA[i + 1],
+            spineB[j],
+            spineB[j + 1]
+          )
+        )
+          return true;
+      }
     }
+    return false;
+  }
 
-    /**
-     * Interpolate control points using Catmull-Rom spline for smooth curves.
-     */
-    private interpolateRiverCurve(controlPoints: Point[]): Point[] {
-        const result: Point[] = [];
-        const segmentsPerSpan = 8;
+  private getLineIntersection(
+    p0: Point,
+    p1: Point,
+    p2: Point,
+    p3: Point
+  ): boolean {
+    const s1_x = p1.x - p0.x;
+    const s1_y = p1.y - p0.y;
+    const s2_x = p3.x - p2.x;
+    const s2_y = p3.y - p2.y;
+    const d = -s2_x * s1_y + s1_x * s2_y;
+    if (Math.abs(d) < 0.001) return false;
+    const s = (-s1_y * (p0.x - p2.x) + s1_x * (p0.y - p2.y)) / d;
+    const t = (s2_x * (p0.y - p2.y) - s2_y * (p0.x - p2.x)) / d;
+    return s >= 0 && s <= 1 && t >= 0 && t <= 1;
+  }
 
-        for (let i = 0; i < controlPoints.length - 1; i++) {
-            const p0 = controlPoints[Math.max(0, i - 1)];
-            const p1 = controlPoints[i];
-            const p2 = controlPoints[Math.min(controlPoints.length - 1, i + 1)];
-            const p3 = controlPoints[Math.min(controlPoints.length - 1, i + 2)];
-
-            for (let j = 0; j < segmentsPerSpan; j++) {
-                const t = j / segmentsPerSpan;
-                const point = catmullRom(p0, p1, p2, p3, t);
-                result.push(point);
-            }
-        }
-
-        result.push(controlPoints[controlPoints.length - 1]);
-        return result;
+  private resamplePolyline(points: Point[], segmentLength: number): Point[] {
+    if (points.length < 2) return points;
+    const newPoints: Point[] = [points[0]];
+    let distSoFar = 0;
+    for (let i = 1; i < points.length; i++) {
+      const p1 = points[i - 1];
+      const p2 = points[i];
+      const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      let currentDist = distSoFar + dist;
+      while (currentDist >= segmentLength) {
+        const overflow = currentDist - segmentLength;
+        const t = 1 - overflow / dist;
+        newPoints.push({
+          x: p1.x + (p2.x - p1.x) * t,
+          y: p1.y + (p2.y - p1.y) * t,
+        });
+        currentDist -= segmentLength;
+        distSoFar = -overflow;
+      }
+      distSoFar = currentDist;
     }
+    newPoints.push(points[points.length - 1]);
+    return newPoints;
+  }
 
-    /**
-     * Add a tributary (inflow stream) that flows from map edge to join the main river.
-     */
-    private addTributary(mainCenterline: Point[], baseWidth: number, horizontal: boolean) {
-        const { width, height } = this.params;
-        const tributaryWidth = baseWidth * (0.3 + Math.random() * 0.25);
-
-        const joinIdx = Math.floor(mainCenterline.length * (0.15 + Math.random() * 0.7));
-        const joinPoint = mainCenterline[joinIdx];
-        const side = Math.random() > 0.5 ? 1 : -1;
-
-        const numPoints = 8 + Math.floor(Math.random() * 4);
-        const controlPoints: Point[] = [];
-        const approachAngle = (30 + Math.random() * 40) * (Math.PI / 180);
-        const flowDirection = Math.random() > 0.5 ? 1 : -1;
-
-        let startX: number, startY: number;
-        const edgeOffset = 300 + Math.random() * 400;
-
-        if (horizontal) {
-            startY = side > 0 ? height : 0;
-            startX = joinPoint.x + flowDirection * edgeOffset * Math.tan(approachAngle);
-            startX = Math.max(50, Math.min(width - 50, startX));
-        } else {
-            startX = side > 0 ? width : 0;
-            startY = joinPoint.y + flowDirection * edgeOffset * Math.tan(approachAngle);
-            startY = Math.max(50, Math.min(height - 50, startY));
-        }
-
-        const maxMeander = 40 + Math.random() * 50;
-        let perpVelocity = (Math.random() - 0.5) * 15;
-        let perpAcceleration = 0;
-
-        const flowDx = joinPoint.x - startX;
-        const flowDy = joinPoint.y - startY;
-        const flowLen = Math.sqrt(flowDx * flowDx + flowDy * flowDy) || 1;
-        const perpX = -flowDy / flowLen;
-        const perpY = flowDx / flowLen;
-
-        let perpOffset = 0;
-
-        for (let i = 0; i < numPoints; i++) {
-            const t = i / (numPoints - 1);
-
-            const baseX = startX + (joinPoint.x - startX) * t;
-            const baseY = startY + (joinPoint.y - startY) * t;
-
-            if (Math.random() < 0.35) {
-                perpAcceleration = (Math.random() - 0.5) * 12;
-            } else {
-                perpAcceleration += (Math.random() - 0.5) * 8;
-            }
-
-            perpVelocity += perpAcceleration;
-            perpVelocity *= 0.75;
-
-            const maxVel = maxMeander / 4;
-            perpVelocity = Math.max(-maxVel, Math.min(maxVel, perpVelocity));
-
-            perpOffset += perpVelocity;
-            perpOffset = Math.max(-maxMeander, Math.min(maxMeander, perpOffset));
-
-            const connectionFactor = t > 0.75 ? (1 - t) / 0.25 : (t < 0.1 ? t / 0.1 : 1);
-            const totalMeander = perpOffset * connectionFactor;
-
-            controlPoints.push({
-                x: baseX + perpX * totalMeander,
-                y: baseY + perpY * totalMeander
-            });
-        }
-
-        if (controlPoints.length >= 3) {
-            const smoothTributary = this.interpolateRiverCurve(controlPoints);
-            const tributaryPolygon = this.riverToPolygon(smoothTributary, tributaryWidth);
-            this.waterBodies.push({ type: 'RIVER', points: tributaryPolygon });
-        }
+  private smoothPoints(points: Point[], passes: number): Point[] {
+    let current = points;
+    for (let p = 0; p < passes; p++) {
+      const next = [current[0]];
+      for (let i = 1; i < current.length - 1; i++) {
+        next.push({
+          x: (current[i - 1].x + current[i].x + current[i + 1].x) / 3,
+          y: (current[i - 1].y + current[i].y + current[i + 1].y) / 3,
+        });
+      }
+      next.push(current[current.length - 1]);
+      current = next;
     }
+    return current;
+  }
 
-    /**
-     * Add a river branch that splits off and rejoins, creating an island.
-     */
-    private addRiverIsland(mainCenterline: Point[], baseWidth: number, horizontal: boolean) {
-        const branchWidth = baseWidth * (0.4 + Math.random() * 0.3);
-
-        const startIdx = Math.floor(mainCenterline.length * (0.25 + Math.random() * 0.15));
-        const endIdx = Math.floor(mainCenterline.length * (0.55 + Math.random() * 0.2));
-
-        if (endIdx - startIdx < 12) return;
-
-        const branchPoints: Point[] = [];
-        const branchOffset = (Math.random() > 0.5 ? 1 : -1) * (50 + Math.random() * 70);
-
-        for (let i = startIdx; i <= endIdx; i++) {
-            const t = (i - startIdx) / (endIdx - startIdx);
-            const mainPoint = mainCenterline[i];
-            const offsetAmount = Math.sin(t * Math.PI) * branchOffset;
-
-            if (horizontal) {
-                branchPoints.push({ x: mainPoint.x, y: mainPoint.y + offsetAmount });
-            } else {
-                branchPoints.push({ x: mainPoint.x + offsetAmount, y: mainPoint.y });
-            }
-        }
-
-        if (branchPoints.length >= 5) {
-            const branchPolygon = this.riverToPolygon(branchPoints, branchWidth);
-            this.waterBodies.push({ type: 'RIVER', points: branchPolygon });
-        }
+  private smoothArray(arr: number[], passes: number): number[] {
+    let current = [...arr];
+    for (let p = 0; p < passes; p++) {
+      const next = [current[0]];
+      for (let i = 1; i < current.length - 1; i++) {
+        next.push((current[i - 1] + current[i] + current[i + 1]) / 3);
+      }
+      next.push(current[current.length - 1]);
+      current = next;
     }
+    return current;
+  }
 
-    /**
-     * Convert a river centerline to a polygon by offsetting both sides.
-     */
-    private riverToPolygon(centerline: Point[], width: number): Point[] {
-        const leftSide: Point[] = [];
-        const rightSide: Point[] = [];
-        const halfWidth = width / 2;
-
-        const noiseValues: number[] = [];
-        for (let i = 0; i < centerline.length; i++) {
-            noiseValues.push(0.9 + Math.random() * 0.2);
-        }
-
-        const smoothedNoise: number[] = [];
-        for (let i = 0; i < noiseValues.length; i++) {
-            const prev = noiseValues[Math.max(0, i - 1)];
-            const curr = noiseValues[i];
-            const next = noiseValues[Math.min(noiseValues.length - 1, i + 1)];
-            smoothedNoise.push((prev + curr + next) / 3);
-        }
-
-        for (let i = 0; i < centerline.length; i++) {
-            const curr = centerline[i];
-            const prev = centerline[Math.max(0, i - 1)];
-            const next = centerline[Math.min(centerline.length - 1, i + 1)];
-
-            const dx = next.x - prev.x;
-            const dy = next.y - prev.y;
-            const len = Math.sqrt(dx * dx + dy * dy) || 1;
-
-            const nx = -dy / len;
-            const ny = dx / len;
-
-            const localWidth = halfWidth * smoothedNoise[i];
-
-            leftSide.push({ x: curr.x + nx * localWidth, y: curr.y + ny * localWidth });
-            rightSide.push({ x: curr.x - nx * localWidth, y: curr.y - ny * localWidth });
-        }
-
-        return [...leftSide, ...rightSide.reverse()];
+  private interpolateCurve(points: Point[], segments: number): Point[] {
+    if (points.length < 2) return points;
+    const result: Point[] = [points[0]];
+    for (let i = 0; i < points.length - 1; i++) {
+      const p0 = points[Math.max(0, i - 1)];
+      const p1 = points[i];
+      const p2 = points[Math.min(points.length - 1, i + 1)];
+      const p3 = points[Math.min(points.length - 1, i + 2)];
+      for (let j = 1; j <= segments; j++) {
+        result.push(catmullRom(p0, p1, p2, p3, j / segments));
+      }
     }
+    return result;
+  }
 
-    /**
-     * Generate a coastline with natural curves, coves and peninsulas.
-     */
-    private generateCoast() {
-        const { width, height } = this.params;
+  private findEdgeIntersection(origin: Point, angle: number): Point | null {
+    const { width, height } = this.params;
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return null;
+    let minT = Infinity;
+    if (dx > 0) minT = Math.min(minT, (width - origin.x) / dx);
+    if (dx < 0) minT = Math.min(minT, (0 - origin.x) / dx);
+    if (dy > 0) minT = Math.min(minT, (height - origin.y) / dy);
+    if (dy < 0) minT = Math.min(minT, (0 - origin.y) / dy);
+    if (minT === Infinity || minT < 0) return null;
+    const pad = 150; // Push well outside map
+    return { x: origin.x + (minT + pad) * dx, y: origin.y + (minT + pad) * dy };
+  }
 
-        const side = Math.floor(Math.random() * 4);
-        const numControlPoints = 14 + Math.floor(Math.random() * 6);
-        const coastDepth = width * (0.15 + Math.random() * 0.15);
+  private getPolygonCentroid(pts: Point[]): Point {
+    let x = 0,
+      y = 0;
+    pts.forEach((p) => {
+      x += p.x;
+      y += p.y;
+    });
+    return { x: x / pts.length, y: y / pts.length };
+  }
 
-        const numFeatures = 2 + Math.floor(Math.random() * 3);
-        const features: { position: number; type: 'cove' | 'peninsula'; size: number }[] = [];
-        for (let i = 0; i < numFeatures; i++) {
-            features.push({
-                position: 0.1 + Math.random() * 0.8,
-                type: Math.random() > 0.5 ? 'cove' : 'peninsula',
-                size: 0.3 + Math.random() * 0.5
-            });
-        }
+  private getFurthestMapEdge(target: Point, w: number, h: number): Point {
+    const dL = target.x,
+      dR = w - target.x,
+      dT = target.y,
+      dB = h - target.y;
+    const max = Math.max(dL, dR, dT, dB);
+    const pad = -150;
+    if (max === dL) return { x: pad, y: Math.random() * h };
+    if (max === dR) return { x: w - pad, y: Math.random() * h };
+    if (max === dT) return { x: Math.random() * w, y: pad };
+    return { x: Math.random() * w, y: h - pad };
+  }
 
-        const controlPoints: Point[] = [];
-        let depthVelocity = 0;
-        const wavelength = 300 + Math.random() * 200;
-        const baseAmplitude = 40 + Math.random() * 40;
-
-        if (side === 0 || side === 1) {
-            const baseX = side === 0 ? coastDepth : width - coastDepth;
-            const sign = side === 0 ? 1 : -1;
-
-            for (let i = 0; i <= numControlPoints; i++) {
-                const t = i / numControlPoints;
-                const y = height * t;
-
-                const sinVariation = Math.sin((y / wavelength) * Math.PI * 2) * baseAmplitude;
-                depthVelocity += (Math.random() - 0.5) * 25;
-                depthVelocity *= 0.75;
-
-                let featureOffset = 0;
-                for (const feature of features) {
-                    const distToFeature = Math.abs(t - feature.position);
-                    const featureWidth = 0.15;
-                    if (distToFeature < featureWidth) {
-                        const featureStrength = Math.cos((distToFeature / featureWidth) * Math.PI / 2);
-                        const featureSize = coastDepth * feature.size;
-                        if (feature.type === 'cove') {
-                            featureOffset -= featureStrength * featureSize;
-                        } else {
-                            featureOffset += featureStrength * featureSize;
-                        }
-                    }
-                }
-
-                const totalOffset = sinVariation + depthVelocity + featureOffset;
-                controlPoints.push({ x: baseX + sign * totalOffset, y });
-            }
-        } else {
-            const baseY = side === 2 ? coastDepth : height - coastDepth;
-            const sign = side === 2 ? 1 : -1;
-
-            for (let i = 0; i <= numControlPoints; i++) {
-                const t = i / numControlPoints;
-                const x = width * t;
-
-                const sinVariation = Math.sin((x / wavelength) * Math.PI * 2) * baseAmplitude;
-                depthVelocity += (Math.random() - 0.5) * 25;
-                depthVelocity *= 0.75;
-
-                let featureOffset = 0;
-                for (const feature of features) {
-                    const distToFeature = Math.abs(t - feature.position);
-                    const featureWidth = 0.15;
-                    if (distToFeature < featureWidth) {
-                        const featureStrength = Math.cos((distToFeature / featureWidth) * Math.PI / 2);
-                        const featureSize = coastDepth * feature.size;
-                        if (feature.type === 'cove') {
-                            featureOffset -= featureStrength * featureSize;
-                        } else {
-                            featureOffset += featureStrength * featureSize;
-                        }
-                    }
-                }
-
-                const totalOffset = sinVariation + depthVelocity + featureOffset;
-                controlPoints.push({ x, y: baseY + sign * totalOffset });
-            }
-        }
-
-        const smoothCoastline = this.interpolateCoastCurve(controlPoints);
-        const points: Point[] = [];
-
-        if (side === 0) {
-            points.push({ x: 0, y: 0 });
-            points.push(...smoothCoastline);
-            points.push({ x: 0, y: height });
-        } else if (side === 1) {
-            points.push({ x: width, y: 0 });
-            points.push(...smoothCoastline);
-            points.push({ x: width, y: height });
-        } else if (side === 2) {
-            points.push({ x: 0, y: 0 });
-            points.push(...smoothCoastline);
-            points.push({ x: width, y: 0 });
-        } else {
-            points.push({ x: 0, y: height });
-            points.push(...smoothCoastline);
-            points.push({ x: width, y: height });
-        }
-
-        this.waterBodies.push({ type: 'COAST', points });
+  distanceToWater(point: Point): number {
+    let min = Infinity;
+    for (const w of this.waterBodies) {
+      for (let i = 0; i < w.points.length; i++) {
+        const p1 = w.points[i];
+        const p2 = w.points[(i + 1) % w.points.length];
+        min = Math.min(min, this.pToSeg(point, p1, p2));
+      }
     }
+    return min;
+  }
 
-    private interpolateCoastCurve(controlPoints: Point[]): Point[] {
-        const result: Point[] = [];
-        const segmentsPerSpan = 6;
+  private pToSeg(p: Point, a: Point, b: Point): number {
+    const dx = b.x - a.x,
+      dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    if (l2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+  }
 
-        for (let i = 0; i < controlPoints.length - 1; i++) {
-            const p0 = controlPoints[Math.max(0, i - 1)];
-            const p1 = controlPoints[i];
-            const p2 = controlPoints[Math.min(controlPoints.length - 1, i + 1)];
-            const p3 = controlPoints[Math.min(controlPoints.length - 1, i + 2)];
-
-            for (let j = 0; j < segmentsPerSpan; j++) {
-                const t = j / segmentsPerSpan;
-                result.push(catmullRom(p0, p1, p2, p3, t));
-            }
-        }
-
-        result.push(controlPoints[controlPoints.length - 1]);
-        return result;
+  private generateCoast() {
+    const { width, height } = this.params;
+    const side = Math.floor(Math.random() * 4);
+    const pts: Point[] = [];
+    const num = 25;
+    for (let i = 0; i <= num; i++) {
+      const t = i / num;
+      if (side === 0) pts.push({ x: 0, y: height * t });
+      else if (side === 1) pts.push({ x: width, y: height * t });
+      else if (side === 2) pts.push({ x: width * t, y: 0 });
+      else pts.push({ x: width * t, y: height });
     }
-
-    /**
-     * Generate lakes on the map with varied sizes and shapes.
-     */
-    private generateLake() {
-        const { width, height } = this.params;
-
-        const lakeType = Math.random();
-
-        if (lakeType < 0.4) {
-            this.generateSingleLake(width, height, 0.12 + Math.random() * 0.15, true);
-        } else if (lakeType < 0.7) {
-            const numLakes = 2 + Math.floor(Math.random() * 2);
-            for (let i = 0; i < numLakes; i++) {
-                const size = 0.05 + Math.random() * 0.08;
-                this.generateSingleLake(width, height, size, false);
-            }
-        } else {
-            this.generateElongatedLake(width, height);
-        }
+    const displaced: Point[] = [];
+    const disp = Math.min(width, height) * 0.2;
+    if (side === 0) displaced.push({ x: 0, y: 0 });
+    else if (side === 1) displaced.push({ x: width, y: 0 });
+    else if (side === 2) displaced.push({ x: 0, y: 0 });
+    else displaced.push({ x: 0, y: height });
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const t = i / pts.length;
+      const n = this.noise.fbm(t * 6, 3);
+      const env = Math.sin(t * Math.PI);
+      const d = disp * env * (0.4 + n);
+      let nx = 0,
+        ny = 0;
+      if (side === 0) nx = 1;
+      else if (side === 1) nx = -1;
+      else if (side === 2) ny = 1;
+      else ny = -1;
+      displaced.push({ x: p.x + nx * d, y: p.y + ny * d });
     }
+    if (side === 0) displaced.push({ x: 0, y: height });
+    else if (side === 1) displaced.push({ x: width, y: height });
+    else if (side === 2) displaced.push({ x: width, y: 0 });
+    else displaced.push({ x: width, y: height });
+    this.waterBodies.push({
+      type: "COAST",
+      points: this.interpolateCurve(displaced, 3),
+    });
+  }
 
-    private generateSingleLake(mapWidth: number, mapHeight: number, sizeRatio: number, irregular: boolean) {
-        const margin = sizeRatio + 0.1;
-        const cx = mapWidth * (margin + Math.random() * (1 - 2 * margin));
-        const cy = mapHeight * (margin + Math.random() * (1 - 2 * margin));
-        const baseRadius = Math.min(mapWidth, mapHeight) * sizeRatio;
-
-        const numControlPoints = irregular ? (14 + Math.floor(Math.random() * 6)) : (10 + Math.floor(Math.random() * 4));
-        const controlPoints: Point[] = [];
-
-        let radiusOffset = 0;
-        let radiusVelocity = 0;
-        const variationScale = irregular ? 0.25 : 0.15;
-        const maxOffset = irregular ? 0.5 : 0.3;
-
-        for (let i = 0; i < numControlPoints; i++) {
-            const angle = (Math.PI * 2 / numControlPoints) * i;
-
-            radiusVelocity += (Math.random() - 0.5) * variationScale;
-            radiusVelocity *= 0.65;
-            radiusOffset += radiusVelocity;
-            radiusOffset = Math.max(-maxOffset, Math.min(maxOffset, radiusOffset));
-
-            let extraVariation = 0;
-            if (irregular && Math.random() < 0.2) {
-                extraVariation = (Math.random() - 0.5) * 0.3;
-            }
-
-            const radius = baseRadius * (0.8 + radiusOffset + extraVariation + Math.random() * 0.1);
-
-            controlPoints.push({
-                x: cx + Math.cos(angle) * radius,
-                y: cy + Math.sin(angle) * radius
-            });
-        }
-
-        const smoothPoints = this.interpolateLakeCurve(controlPoints);
-        this.waterBodies.push({ type: 'LAKE', points: smoothPoints });
+  private generateLake() {
+    const { width, height } = this.params;
+    const cx = width * (0.3 + Math.random() * 0.4),
+      cy = height * (0.3 + Math.random() * 0.4);
+    const rad = Math.min(width, height) * 0.15;
+    const pts: Point[] = [];
+    const steps = 30;
+    for (let i = 0; i < steps; i++) {
+      const a = (i / steps) * Math.PI * 2;
+      const n = this.noise.fbm(Math.cos(a) + Math.sin(a) + Math.random(), 3);
+      const r = rad * (0.8 + n * 0.5);
+      pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
     }
-
-    private generateElongatedLake(mapWidth: number, mapHeight: number) {
-        const angle = Math.random() * Math.PI;
-        const cx = mapWidth * (0.3 + Math.random() * 0.4);
-        const cy = mapHeight * (0.3 + Math.random() * 0.4);
-
-        const length = Math.min(mapWidth, mapHeight) * (0.2 + Math.random() * 0.15);
-        const width = length * (0.2 + Math.random() * 0.15);
-
-        const numControlPoints = 16 + Math.floor(Math.random() * 6);
-        const controlPoints: Point[] = [];
-
-        let widthVelocity = 0;
-        let widthOffset = 0;
-
-        for (let i = 0; i < numControlPoints; i++) {
-            const t = i / numControlPoints;
-            const pointAngle = t * Math.PI * 2;
-
-            widthVelocity += (Math.random() - 0.5) * 0.1;
-            widthVelocity *= 0.8;
-            widthOffset += widthVelocity;
-            widthOffset = Math.max(-0.3, Math.min(0.3, widthOffset));
-
-            const widthMultiplier = 1 + widthOffset + Math.random() * 0.1;
-
-            const localX = Math.cos(pointAngle) * length / 2;
-            const localY = Math.sin(pointAngle) * width * widthMultiplier / 2;
-
-            const rotatedX = localX * Math.cos(angle) - localY * Math.sin(angle);
-            const rotatedY = localX * Math.sin(angle) + localY * Math.cos(angle);
-
-            controlPoints.push({
-                x: cx + rotatedX,
-                y: cy + rotatedY
-            });
-        }
-
-        const smoothPoints = this.interpolateLakeCurve(controlPoints);
-        this.waterBodies.push({ type: 'LAKE', points: smoothPoints });
-    }
-
-    private interpolateLakeCurve(controlPoints: Point[]): Point[] {
-        const result: Point[] = [];
-        const segmentsPerSpan = 4;
-        const n = controlPoints.length;
-
-        for (let i = 0; i < n; i++) {
-            const p0 = controlPoints[(i - 1 + n) % n];
-            const p1 = controlPoints[i];
-            const p2 = controlPoints[(i + 1) % n];
-            const p3 = controlPoints[(i + 2) % n];
-
-            for (let j = 0; j < segmentsPerSpan; j++) {
-                const t = j / segmentsPerSpan;
-                result.push(catmullRom(p0, p1, p2, p3, t));
-            }
-        }
-
-        return result;
-    }
-
-    /**
-     * Calculate minimum distance from a point to any water body edge.
-     */
-    distanceToWater(point: Point): number {
-        let minDist = Infinity;
-
-        for (const water of this.waterBodies) {
-            const polygon = water.points;
-            for (let i = 0; i < polygon.length; i++) {
-                const p1 = polygon[i];
-                const p2 = polygon[(i + 1) % polygon.length];
-                const dist = this.pointToSegmentDist(point, p1, p2);
-                if (dist < minDist) {
-                    minDist = dist;
-                }
-            }
-        }
-
-        return minDist;
-    }
-
-    private pointToSegmentDist(point: Point, p1: Point, p2: Point): number {
-        const dx = p2.x - p1.x;
-        const dy = p2.y - p1.y;
-        const lengthSq = dx * dx + dy * dy;
-
-        if (lengthSq === 0) {
-            return Math.sqrt((point.x - p1.x) ** 2 + (point.y - p1.y) ** 2);
-        }
-
-        let t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lengthSq;
-        t = Math.max(0, Math.min(1, t));
-
-        const projX = p1.x + t * dx;
-        const projY = p1.y + t * dy;
-
-        return Math.sqrt((point.x - projX) ** 2 + (point.y - projY) ** 2);
-    }
+    pts.push(pts[0]);
+    this.waterBodies.push({
+      type: "LAKE",
+      points: this.interpolateCurve(pts, 3),
+    });
+  }
 }

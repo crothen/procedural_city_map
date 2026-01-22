@@ -27,6 +27,10 @@ const createTestParams = (overrides: Partial<GenerationParams> = {}): Generation
     minAngle: 30,
     buildingIrregularity: 0.2,
     fixedBuildingDepth: 15,
+    outerCityFalloff: 0.2,
+    outerCityRandomness: 0.5,
+    showCityLimitGradient: false,
+    riverWidth: 30,
     ...overrides
 });
 
