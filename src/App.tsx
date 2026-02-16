@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { CityCanvas } from './components/CityCanvas';
 import { ControlPanel } from './components/ControlPanel';
+import { LoadingOverlay } from './components/LoadingOverlay';
 import { CityGenerator, type GenerationParams } from './logic';
 
 function App() {
@@ -35,6 +36,8 @@ function App() {
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [showGrid, setShowGrid] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingMessage, setProcessingMessage] = useState("Processing...");
   const generatorRef = useRef<CityGenerator>(new CityGenerator(params));
   const requestRef = useRef<number | undefined>(undefined);
 
@@ -151,8 +154,15 @@ function App() {
   };
 
   const handleGeneratePlots = () => {
-    generator.generateBlocks();
-    forceUpdate(n => n + 1); // Update UI to enable building generation
+    setIsProcessing(true);
+    setProcessingMessage("Generating Plots...");
+
+    // Allow UI to render loading state
+    setTimeout(() => {
+      generator.generateBlocks();
+      forceUpdate(n => n + 1);
+      setIsProcessing(false);
+    }, 50);
   };
 
   const handleClearPlots = () => {
@@ -171,6 +181,18 @@ function App() {
     forceUpdate(n => n + 1); // Update UI
   };
 
+  const handleCleanup = () => {
+    setIsProcessing(true);
+    setProcessingMessage("Cleaning Map...");
+
+    // Use setTimeout to allow React to render the loading state first
+    setTimeout(() => {
+      generator.cleanup();
+      forceUpdate(n => n + 1);
+      setIsProcessing(false);
+    }, 50);
+  };
+
   return (
     <div className="flex w-full h-screen bg-[#09090b] overflow-hidden">
       <ControlPanel
@@ -186,6 +208,7 @@ function App() {
         onTogglePlots={() => generator.toggleBlocks()}
         onGeneratePlots={handleGeneratePlots}
         onClearPlots={handleClearPlots}
+        onCleanup={handleCleanup}
         onGenerateBuildings={handleGenerateBuildings}
         onClearBuildings={handleClearBuildings}
         buildingCount={generator.buildings.length}
@@ -193,9 +216,11 @@ function App() {
         isBuildingGenerating={generator.isBuildingGenerationActive()}
         onPlaceCenter={handlePlaceCenterStart}
         isPlacingCenter={isPlacingCenter}
+        isProcessing={isProcessing}
       />
 
       <div ref={containerRef} className="flex-1 relative">
+        {isProcessing && <LoadingOverlay message={processingMessage} />}
         {dimensions.width > 0 && (
           <CityCanvas
             generator={generator}

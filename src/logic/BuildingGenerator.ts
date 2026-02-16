@@ -1,19 +1,20 @@
 import type {
   Point,
-  Node,
-  Edge,
-  Block,
   Building,
   GenerationParams,
+  Node,
+  Edge,
 } from "./types";
 import {
   calculateCentroid,
+  getBoundingBox,
+  pointInPolygon,
   splitPolygon,
   getOBB,
-  getBoundingBox,
   calculatePolygonArea,
-  pointInPolygon,
+  validatePolygon,
 } from "./geometry";
+import { WaterGenerator } from "./WaterGenerator";
 import type { Plot } from "./PlotGenerator";
 
 export class BuildingGenerator {
@@ -34,27 +35,30 @@ export class BuildingGenerator {
   private nodes: Map<string, Node>;
   private edges: Edge[];
   private blocks: Plot[];
+  private waterGen: WaterGenerator;
 
   constructor(
     params: GenerationParams,
     nodes: Map<string, Node>,
     edges: Edge[],
-    blocks: Block[]
+    blocks: Plot[],
+    waterGen: WaterGenerator
   ) {
     this.params = params;
     this.nodes = nodes;
     this.edges = edges;
-    this.blocks = blocks as Plot[];
+    this.blocks = blocks;
+    this.waterGen = waterGen;
   }
 
   updateParams(params: GenerationParams) {
     this.params = params;
   }
 
-  updateRefs(nodes: Map<string, Node>, edges: Edge[], blocks: Block[]) {
+  updateRefs(nodes: Map<string, Node>, edges: Edge[], blocks: Plot[]) {
     this.nodes = nodes;
     this.edges = edges;
-    this.blocks = blocks as Plot[];
+    this.blocks = blocks;
   }
 
   startGeneration() {
@@ -148,7 +152,7 @@ export class BuildingGenerator {
           scraps = res.scraps;
         }
 
-        // SIMPLIFICATION PASS (User Request 1)
+        // SIMPLIFICATION PASS
         buildingPoly = this.simplifyShape(buildingPoly, 2.0); // 2px tolerance
 
         if (calculatePolygonArea(buildingPoly) > this.params.minBuildingArea) {
@@ -170,6 +174,70 @@ export class BuildingGenerator {
         }
       }
     }
+  }
+
+  /**
+   * Checks if a plot can fit a valid building without actually generating it.
+   * This is used for cleanup to detect "unbuildable" plots.
+   */
+  canFitBuilding(plot: Plot): boolean {
+    if (!plot.points || plot.points.length < 3) return false;
+
+    const roadSegments: { p1: Point; p2: Point; id: string }[] = [];
+    const roadIds = plot.roadIds || [];
+
+    for (const id of roadIds) {
+      const e = this.edges.find((ed) => ed.id === id);
+      if (e) {
+        const p1 = this.nodes.get(e.startNodeId);
+        const p2 = this.nodes.get(e.endNodeId);
+        if (p1 && p2) roadSegments.push({ p1, p2, id: e.id });
+      }
+    }
+
+    const lots: Point[][] = [];
+    // Depth 0 subdivision
+    this.smartSubdivide(plot.points, roadSegments, lots, 0);
+
+    for (const lot of lots) {
+      if (calculatePolygonArea(lot) < this.params.minBuildingArea / 2) continue;
+
+      const touching = this.getTouchingSegments(lot, roadSegments, 3.0);
+      if (touching.length > 0) {
+        // Road access logic
+        const uniqueRoads = new Set(touching.map((t) => t.id)).size;
+        const isCornerOrThrough = uniqueRoads > 1;
+        let buildingPoly = lot;
+
+        const shouldTrim =
+          this.params.fixedBuildingDepth > 0 &&
+          (!isCornerOrThrough || calculatePolygonArea(lot) > this.params.maxBuildingArea);
+
+        if (shouldTrim) {
+          const res = this.trimBuilding(lot, touching, this.params.fixedBuildingDepth);
+          buildingPoly = res.building;
+        }
+
+        buildingPoly = this.simplifyShape(buildingPoly, 2.0);
+
+        if (calculatePolygonArea(buildingPoly) > this.params.minBuildingArea) {
+          const obb = getOBB(buildingPoly);
+          if (obb.width >= this.params.minEdgeLength) {
+            // Check angles (permissive 20 deg)
+            const validation = validatePolygon(buildingPoly, this.params.minBuildingArea, 999999, this.params.minEdgeLength, Math.max(10, this.params.minAngle - 10));
+            if (validation.valid) return true;
+          }
+        }
+      } else {
+        // Landlocked logic
+        if (plot.isEnclosed && calculatePolygonArea(lot) > this.params.minBuildingArea) {
+          const validation = validatePolygon(lot, this.params.minBuildingArea, 999999, this.params.minEdgeLength, this.params.minAngle);
+          if (validation.valid) return true;
+        }
+      }
+    }
+
+    return false; // No valid buildings found in this plot
   }
 
   /**
@@ -336,19 +404,7 @@ export class BuildingGenerator {
       // Define cut line at 'depth' distance
       const cutPt = { x: mid.x + nx * depth, y: mid.y + ny * depth };
 
-
-      const [front, back] = splitPolygon(current, cutPt, { x: nx, y: ny }); // Split along road normal? No, split parallel to road
-
-      // Actually splitPolygon splits by a Plane defined by Point and Normal.
-      // If we want to trim depth, the split Plane normal is the direction we move into the lot (nx, ny)
-      // Wait, splitPolygon usually takes (Poly, PointOnPlane, PlaneNormal).
-      // If we want a line parallel to the road, the Normal of that cut-line is (nx, ny).
-
-      // Determine which piece is the building.
-      // "Back" is usually the one further along the normal.
-
-      // Heuristic: The piece closer to the road is the "Setback" area if we were doing setbacks.
-      // But here we are doing "Building Depth". So we want to KEEP the piece closer to road.
+      const [front, back] = splitPolygon(current, cutPt, { x: nx, y: ny });
 
       const distF = this.distToSegment(
         calculateCentroid(front),
@@ -401,9 +457,18 @@ export class BuildingGenerator {
     );
   }
 
+
+
   private addBuilding(points: Point[], isBuilding: boolean) {
     // STRICT OVERLAP CHECK
     if (isBuilding && this.checkCollision(points)) return;
+
+    // STRICT WATER CHECK
+    // Check all vertices + centroid
+    for (const p of points) {
+      if (this.waterGen.isPointInWater(p)) return;
+    }
+    if (this.waterGen.isPointInWater(calculateCentroid(points))) return;
 
     const b: Building = {
       id: (isBuilding ? "b_" : "c_") + this.buildingIdCounter++,

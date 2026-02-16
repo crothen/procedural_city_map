@@ -39,6 +39,15 @@ export interface Block {
     roadIds: string[]; // IDs of edges that define street frontage
 }
 
+export interface Lot {
+    id: string;
+    points: Point[];
+    blockId: string; // Parent block
+    roadIds: string[]; // Frontage edges
+    center: Point;
+    area: number;
+}
+
 export interface GenerationParams {
     width: number;
     height: number;

@@ -1,6 +1,8 @@
 
 import { useState } from 'react';
 import type { GenerationParams } from '../logic';
+import { InfoTooltip, SectionInfo } from './Tooltips';
+import { KNOWLEDGE_BASE, type KnowledgeEntry } from '../data/knowledge_base';
 
 interface ControlPanelProps {
     params: GenerationParams;
@@ -15,6 +17,7 @@ interface ControlPanelProps {
     onTogglePlots: () => void;
     onGeneratePlots: () => void;
     onClearPlots: () => void;
+    onCleanup: () => void;
     onGenerateBuildings: () => void;
     onClearBuildings: () => void;
     buildingCount: number;
@@ -22,14 +25,16 @@ interface ControlPanelProps {
     isBuildingGenerating: boolean;
     onPlaceCenter: () => void;
     isPlacingCenter: boolean;
+    isProcessing?: boolean;
 }
 
 // Collapsible card section
-const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = false }: {
+const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = false, info }: {
     title: string;
     children: React.ReactNode;
     color?: string;
     defaultOpen?: boolean;
+    info?: KnowledgeEntry;
 }) => {
     const [isOpen, setIsOpen] = useState(defaultOpen);
 
@@ -44,20 +49,27 @@ const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = false 
 
     return (
         <div className="bg-gray-900/50 rounded-lg border border-white/5 overflow-hidden mb-3 shrink-0">
-            <button
+            <div
                 onClick={() => setIsOpen(!isOpen)}
-                className={`w-full px-3 py-2 flex items-center justify-between transition-colors ${headerColors[color]} ${isOpen ? 'border-b' : ''}`}
+                className={`w-full px-3 py-2 flex items-center justify-between transition-colors cursor-pointer ${headerColors[color]} ${isOpen ? 'border-b' : ''}`}
             >
-                <h3 className="text-sm font-bold uppercase tracking-wider">{title}</h3>
-                <svg
-                    className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`}
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-            </button>
+                <div className="flex items-center flex-1">
+                    <h3 className="text-sm font-bold uppercase tracking-wider">{title}</h3>
+                </div>
+
+                <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                    {info && <SectionInfo info={info} />}
+                    <svg
+                        className={`w-4 h-4 transition-transform ml-2 ${isOpen ? 'rotate-180' : ''}`}
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        onClick={() => setIsOpen(!isOpen)}
+                    >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                </div>
+            </div>
             {isOpen && (
                 <div className="p-3">
                     {children}
@@ -68,27 +80,32 @@ const CollapsibleCard = ({ title, children, color = 'cyan', defaultOpen = false 
 };
 
 // Toggle component (compact)
-const Toggle = ({ label, checked, onChange, color = 'cyan' }: {
+const Toggle = ({ label, checked, onChange, color = 'cyan', tooltip }: {
     label: string;
     checked: boolean;
     onChange: () => void;
     color?: string;
+    tooltip?: string;
 }) => {
     const colorClasses: Record<string, string> = {
         cyan: 'bg-cyan-500',
         purple: 'bg-purple-500',
         orange: 'bg-orange-500',
         amber: 'bg-amber-500',
+        blue: 'bg-blue-500', // Added missing blue
     };
 
     return (
         <div className="flex items-center justify-between py-1">
-            <label className="text-sm text-gray-400 cursor-pointer" onClick={onChange}>
-                {label}
-            </label>
+            <div className="flex items-center">
+                <label className="text-sm text-gray-400 cursor-pointer" onClick={onChange}>
+                    {label}
+                </label>
+                {tooltip && <InfoTooltip text={tooltip} />}
+            </div>
             <div
                 onClick={onChange}
-                className={`w-10 h-5 rounded-full cursor-pointer relative transition-colors ${checked ? colorClasses[color] : 'bg-gray-700'}`}
+                className={`w-10 h-5 rounded-full cursor-pointer relative transition-colors ${checked ? (colorClasses[color] || 'bg-cyan-500') : 'bg-gray-700'}`}
             >
                 <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
             </div>
@@ -97,15 +114,17 @@ const Toggle = ({ label, checked, onChange, color = 'cyan' }: {
 };
 
 // Compact slider component
-const Slider = ({ label, value, min, max, step, onChange, color = 'cyan', unit = '' }: {
+const Slider = ({ label, value, min, max, step, onChange, color = 'cyan', unit = '', tooltip }: {
     label: string;
     value: number;
     min: number;
     max: number;
+    maxLabel?: string;
     step: number;
     onChange: (value: number) => void;
     color?: string;
     unit?: string;
+    tooltip?: string;
 }) => {
     const colorClasses: Record<string, string> = {
         cyan: 'text-cyan-400 accent-cyan-400',
@@ -121,7 +140,10 @@ const Slider = ({ label, value, min, max, step, onChange, color = 'cyan', unit =
     return (
         <div>
             <div className="flex justify-between mb-1">
-                <label className="text-sm text-gray-500">{label}</label>
+                <div className="flex items-center">
+                    <label className="text-sm text-gray-500">{label}</label>
+                    {tooltip && <InfoTooltip text={tooltip} />}
+                </div>
                 <span className={`text-sm font-mono ${colorClasses[color]}`}>{displayValue}{unit}</span>
             </div>
             <input
@@ -138,14 +160,18 @@ const Slider = ({ label, value, min, max, step, onChange, color = 'cyan', unit =
 };
 
 // Compact select component
-const Select = ({ label, value, options, onChange }: {
+const Select = ({ label, value, options, onChange, tooltip }: {
     label: string;
     value: string;
     options: { value: string; label: string }[];
     onChange: (value: string) => void;
+    tooltip?: string;
 }) => (
     <div>
-        <label className="text-sm text-gray-500 mb-1 block">{label}</label>
+        <div className="flex items-center mb-1">
+            <label className="text-sm text-gray-500 block">{label}</label>
+            {tooltip && <InfoTooltip text={tooltip} />}
+        </div>
         <select
             value={value}
             onChange={(e) => onChange(e.target.value)}
@@ -197,13 +223,15 @@ export const ControlPanel = ({
     onTogglePlots,
     onGeneratePlots,
     onClearPlots,
+    onCleanup,
     onGenerateBuildings,
     onClearBuildings,
     buildingCount,
     plotCount,
     isBuildingGenerating,
     onPlaceCenter,
-    isPlacingCenter
+    isPlacingCenter,
+    isProcessing = false
 }: ControlPanelProps) => {
 
     const handleChange = (key: keyof GenerationParams, value: number | string | boolean) => {
@@ -220,10 +248,13 @@ export const ControlPanel = ({
             </h2>
 
             {/* Map Settings */}
-            <CollapsibleCard title="Map Settings" color="blue">
+            <CollapsibleCard title="Map Settings" color="blue" info={KNOWLEDGE_BASE.sections.mapParams}>
                 <div className="flex gap-2 mb-2">
                     <div className="flex-1">
-                        <label className="text-sm text-gray-500 mb-1 block">Width (m)</label>
+                        <div className="flex items-center mb-1">
+                            <label className="text-sm text-gray-500 mr-1">Width (m)</label>
+                            <InfoTooltip text={KNOWLEDGE_BASE.tooltips.width} />
+                        </div>
                         <input
                             type="number"
                             value={params.width}
@@ -232,7 +263,10 @@ export const ControlPanel = ({
                         />
                     </div>
                     <div className="flex-1">
-                        <label className="text-sm text-gray-500 mb-1 block">Height (m)</label>
+                        <div className="flex items-center mb-1">
+                            <label className="text-sm text-gray-500 mr-1">Height (m)</label>
+                            <InfoTooltip text={KNOWLEDGE_BASE.tooltips.height} />
+                        </div>
                         <input
                             type="number"
                             value={params.height}
@@ -247,23 +281,15 @@ export const ControlPanel = ({
             </CollapsibleCard>
 
             {/* City Settings */}
-            <CollapsibleCard title="City Settings" color="purple">
+            <CollapsibleCard title="City Settings" color="purple" info={KNOWLEDGE_BASE.sections.cityParams}>
                 <Slider
                     label="Inner City Size"
                     value={params.citySize * 100}
                     min={5} max={100} step={5}
+                    tooltip={KNOWLEDGE_BASE.tooltips.innerCitySize}
                     onChange={(v) => {
                         const newSize = v / 100;
                         handleChange('citySize', newSize);
-                        // Trigger regeneration after a small delay to allow state to settle
-                        // Note: A better approach would be to debounce this or use useEffect in App.tsx
-                        // But for direct UI feedback this works if the parent handles it correctly.
-                        // Actually, since handleChange updates parent state, we should pass the NEW param value
-                        // but onGenerateCityBoundary reads from the ref which tracks params.
-                        // We need to ensure the ref is updated.
-                        // The App.tsx updates the ref in useEffect [params].
-                        // So immediate call might be too fast.
-                        // Let's use a timeout.
                         setTimeout(() => onGenerateCityBoundary(), 50);
                     }}
                     color="orange"
@@ -274,6 +300,7 @@ export const ControlPanel = ({
                     checked={params.hardCityLimit}
                     onChange={() => handleChange('hardCityLimit', !params.hardCityLimit)}
                     color="orange"
+                    tooltip={KNOWLEDGE_BASE.tooltips.hardCityLimit}
                 />
                 <SmallButton onClick={onGenerateCityBoundary} variant="primary" className="w-full mt-2">
                     Generate City Limits
@@ -295,6 +322,7 @@ export const ControlPanel = ({
                         onChange={(v) => handleChange('outerCityFalloff', v / 100)}
                         color="blue"
                         unit="%"
+                        tooltip={KNOWLEDGE_BASE.tooltips.outerCityFalloff}
                     />
                     <Slider
                         label="Gradient Randomness"
@@ -303,18 +331,20 @@ export const ControlPanel = ({
                         onChange={(v) => handleChange('outerCityRandomness', v / 100)}
                         color="purple"
                         unit="%"
+                        tooltip={KNOWLEDGE_BASE.tooltips.gradientRandomness}
                     />
                     <Toggle
                         label="Show Gradient"
                         checked={params.showCityLimitGradient}
                         onChange={() => handleChange('showCityLimitGradient', !params.showCityLimitGradient)}
                         color="blue"
+                        tooltip={KNOWLEDGE_BASE.tooltips.showCityLimitGradient}
                     />
                 </div>
             </CollapsibleCard>
 
             {/* Water Settings */}
-            <CollapsibleCard title="Water" color="cyan">
+            <CollapsibleCard title="Water" color="cyan" info={KNOWLEDGE_BASE.sections.waterParams}>
                 <Select
                     label="Water Feature"
                     value={params.waterFeature}
@@ -325,6 +355,7 @@ export const ControlPanel = ({
                         { value: 'LAKE', label: 'Lake' },
                     ]}
                     onChange={(v) => handleChange('waterFeature', v)}
+                    tooltip={KNOWLEDGE_BASE.tooltips.waterFeature}
                 />
                 {params.waterFeature === 'RIVER' && (
                     <Slider
@@ -334,6 +365,7 @@ export const ControlPanel = ({
                         onChange={(v) => handleChange('riverWidth', v)}
                         color="cyan"
                         unit="m"
+                        tooltip={KNOWLEDGE_BASE.tooltips.riverWidth}
                     />
                 )}
                 <SmallButton onClick={onGenerateWater} variant="primary" className="w-full mt-2">
@@ -342,7 +374,7 @@ export const ControlPanel = ({
             </CollapsibleCard>
 
             {/* Road Generation */}
-            <CollapsibleCard title="Roads" color="green">
+            <CollapsibleCard title="Roads" color="green" info={KNOWLEDGE_BASE.sections.roadParams}>
                 <Select
                     label="Strategy"
                     value={params.strategy}
@@ -352,6 +384,7 @@ export const ControlPanel = ({
                         { value: 'RADIAL', label: 'Radial' },
                     ]}
                     onChange={(v) => handleChange('strategy', v)}
+                    tooltip={KNOWLEDGE_BASE.tooltips.roadStrategy}
                 />
                 <Slider
                     label="Branching"
@@ -359,6 +392,7 @@ export const ControlPanel = ({
                     min={0} max={1} step={0.01}
                     onChange={(v) => handleChange('branchingFactor', v)}
                     color="cyan"
+                    tooltip={KNOWLEDGE_BASE.tooltips.branchingFactor}
                 />
                 <Slider
                     label="Segment Length"
@@ -366,6 +400,7 @@ export const ControlPanel = ({
                     min={5} max={50} step={1}
                     onChange={(v) => handleChange('segmentLength', v)}
                     color="green"
+                    tooltip={KNOWLEDGE_BASE.tooltips.segmentLength}
                 />
                 <SmallButton onClick={onGenerateRoads} variant="primary" className="w-full mt-2">
                     Generate Roads
@@ -373,16 +408,19 @@ export const ControlPanel = ({
             </CollapsibleCard>
 
             {/* Plots */}
-            <CollapsibleCard title="Plots" color="amber">
+            <CollapsibleCard title="Plots" color="amber" info={KNOWLEDGE_BASE.sections.plotParams}>
                 <div className="flex items-center gap-2 mb-3">
                     <span className="text-sm text-gray-400 flex-shrink-0">Count:</span>
                     <span className="text-sm font-mono text-amber-400 bg-amber-500/10 px-2 py-1 rounded">{plotCount}</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2 mb-3">
-                    <SmallButton onClick={onGeneratePlots} variant="primary" className="!bg-amber-900/40 !text-amber-400 !border-amber-500/30 hover:!bg-amber-800/50">
+                    <SmallButton onClick={() => !isProcessing && onGeneratePlots()} variant="primary" className="!bg-amber-900/40 !text-amber-400 !border-amber-500/30 hover:!bg-amber-800/50">
                         Generate
                     </SmallButton>
-                    <SmallButton onClick={onClearPlots} disabled={!hasPlots}>
+                    <SmallButton onClick={() => !isProcessing && onCleanup()} disabled={!hasPlots || isProcessing}>
+                        {isProcessing ? 'Working...' : 'Cleanup'}
+                    </SmallButton>
+                    <SmallButton onClick={() => !isProcessing && onClearPlots()} disabled={!hasPlots} className="col-span-2">
                         Clear
                     </SmallButton>
                 </div>
@@ -391,11 +429,12 @@ export const ControlPanel = ({
                     checked={showPlots}
                     onChange={onTogglePlots}
                     color="amber"
+                    tooltip={KNOWLEDGE_BASE.tooltips.showPlots}
                 />
             </CollapsibleCard>
 
             {/* Buildings */}
-            <CollapsibleCard title="Buildings" color="orange">
+            <CollapsibleCard title="Buildings" color="orange" info={KNOWLEDGE_BASE.sections.buildingParams}>
                 <div className="flex items-center gap-2 mb-3">
                     <span className="text-sm text-gray-400 flex-shrink-0">Count:</span>
                     <span className="text-sm font-mono text-amber-400 bg-amber-500/10 px-2 py-1 rounded">{buildingCount}</span>
@@ -421,6 +460,7 @@ export const ControlPanel = ({
                     onChange={(v) => handleChange('minBuildingArea', v)}
                     color="blue"
                     unit="m²"
+                    tooltip={KNOWLEDGE_BASE.tooltips.minBuildingArea}
                 />
                 <Slider
                     label="Max Building Area"
@@ -429,6 +469,7 @@ export const ControlPanel = ({
                     onChange={(v) => handleChange('maxBuildingArea', v)}
                     color="emerald"
                     unit="m²"
+                    tooltip={KNOWLEDGE_BASE.tooltips.maxBuildingArea}
                 />
                 <Slider
                     label="Min Edge Length"
@@ -437,6 +478,7 @@ export const ControlPanel = ({
                     onChange={(v) => handleChange('minEdgeLength', v)}
                     color="cyan"
                     unit="m"
+                    tooltip={KNOWLEDGE_BASE.tooltips.minEdgeLength}
                 />
                 <Slider
                     label="Min Angle"
@@ -445,6 +487,7 @@ export const ControlPanel = ({
                     onChange={(v) => handleChange('minAngle', v)}
                     color="purple"
                     unit="°"
+                    tooltip={KNOWLEDGE_BASE.tooltips.minAngle}
                 />
                 <Slider
                     label="Irregularity"
@@ -452,6 +495,7 @@ export const ControlPanel = ({
                     min={0} max={0.5} step={0.05}
                     onChange={(v) => handleChange('buildingIrregularity', v)}
                     color="orange"
+                    tooltip={KNOWLEDGE_BASE.tooltips.buildingIrregularity}
                 />
                 <Slider
                     label="Building Depth"
@@ -460,6 +504,7 @@ export const ControlPanel = ({
                     onChange={(v) => handleChange('fixedBuildingDepth', v)}
                     color="green"
                     unit="m"
+                    tooltip={KNOWLEDGE_BASE.tooltips.fixedBuildingDepth}
                 />
 
                 {/* Buildings Row */}
@@ -485,7 +530,7 @@ export const ControlPanel = ({
             </CollapsibleCard>
 
             {/* View Options */}
-            <CollapsibleCard title="View" color="blue" defaultOpen={false}>
+            <CollapsibleCard title="View" color="blue" defaultOpen={false} info={KNOWLEDGE_BASE.sections.viewParams}>
                 <Toggle
                     label="Show Grid"
                     checked={showGrid}

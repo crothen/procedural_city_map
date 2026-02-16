@@ -5,12 +5,15 @@ import {
   shrinkPolygon,
   pointInPolygon,
   getBoundingBox,
+  getOBB,
+  validatePolygon,
 } from "./geometry";
 import { WaterGenerator } from "./WaterGenerator";
 
 export interface Plot extends Block {
   roadIds: string[]; // IDs of roads defining the frontage
   type: "URBAN_CORE" | "SUBURBAN_STRIP";
+  halfEdges: string[]; // "u->v" keys
 }
 
 export class PlotGenerator {
@@ -86,6 +89,9 @@ export class PlotGenerator {
       const dB = Math.hypot(cB.x - this.cityCenter.x, cB.y - this.cityCenter.y);
       return dA - dB;
     });
+
+    // 4. Fill Gaps
+    this.fillGaps();
   }
 
   get blocks() {
@@ -186,14 +192,28 @@ export class PlotGenerator {
     const area = calculatePolygonArea(points);
     const mapArea = this.params.width * this.params.height;
 
-    // Filter "Outer World" (usually huge) and tiny noise
-    if (area > mapArea * 0.8 || area < 50) return;
+    // Raycast to Water
     if (this.waterGenerator.isPointInWater(calculateCentroid(points))) return;
+
+    // Filter "Outer World" (usually huge) and tiny noise
+    // Check absolute area to be safe against winding
+    if (Math.abs(area) > mapArea * 0.8 || Math.abs(area) < 50) return;
+
+    // The loop is typically CW (Right-hand rule). shrinkPolygon assumes CCW?
+    // If shrinkPolygon expects CCW, CW input makes it GROW.
+    // Let's reverse to CCW before shrinking.
+    const ccwPoints = [...points].reverse();
+    if (this.waterGenerator.isPointInWater(calculateCentroid(ccwPoints))) return;
 
     // Shrink by 2.0m.
     // This creates the "Downtown" sidewalk.
-    const shrunk = shrinkPolygon(points, 2.0);
+    const shrunk = shrinkPolygon(ccwPoints, 2.0);
     if (shrunk.length < 3) return;
+
+    // Check area AFTER shrink to ensure it didn't invert or vanish
+    // (Also use Abs area just in case)
+    const finalArea = Math.abs(calculatePolygonArea(shrunk));
+    if (finalArea < 50) return; // Too small after shrink
 
     // Simplify slightly (1.0m) to clean up edges without bulging into the road
     const simple = this.simplifyPolygon(shrunk, 1.0);
@@ -208,9 +228,10 @@ export class PlotGenerator {
       id: `plot_core_${this.plotIdCounter++}`,
       points: simple,
       isEnclosed: true,
-      area: calculatePolygonArea(simple),
+      area: finalArea,
       roadIds: edgeIds,
       type: "URBAN_CORE",
+      halfEdges: keys,
     });
   }
 
@@ -276,44 +297,69 @@ export class PlotGenerator {
     // 4. Trace the full continuous chain forward
     const chain = this.traceRoadStroke(start, end);
 
-    // Mark segments as visited immediately so we don't restart here later
-    for (let i = 0; i < chain.nodeIds.length - 1; i++) {
-      visitedStrokes.add(`${chain.nodeIds[i]}->${chain.nodeIds[i + 1]}`);
+    // Strategy: Try the Full Chain. If it fails, try just the Current Segment (u->v).
+    // This ensures that one bad intersection doesn't kill the whole street.
+    if (this.generateAndAddPlot(chain.nodeIds, chain.edgeIds, depth, visitedStrokes)) {
+      return;
     }
 
-    // 5. GENERATE
+    // Fallback: Try just this single segment
+    // We construct a mini-chain of just [u, v]
+    const singleSegmentNodeIds = [u, v];
+    const segmentEdge = this.getEdgeBetween(u, v);
+    const singleSegmentEdgeIds = segmentEdge ? [segmentEdge.id] : [];
+
+    this.generateAndAddPlot(singleSegmentNodeIds, singleSegmentEdgeIds, depth, visitedStrokes);
+  }
+
+  private generateAndAddPlot(
+    nodeIds: string[],
+    edgeIds: string[],
+    depth: number,
+    visitedStrokes: Set<string>
+  ): boolean {
     const shrinkSteps = [1.0, 0.75, 0.5];
 
     // GAP STRATEGY:
-    // Downtown is at 2.0m. Strip starts at 3.0m.
-    // This leaves a 1.0m "Safety Gap" between them, preventing overlap errors.
+    // This leaves a 1.0m "Safety Gap" between them.
     const gap = 3.0;
 
     for (const scale of shrinkSteps) {
       const currentDepth = depth * scale;
 
-      let poly = this.extrudeChain(chain.nodeIds, gap, currentDepth);
+      let poly = this.extrudeChain(nodeIds, gap, currentDepth);
       poly = this.simplifyPolygon(poly, 1.0);
+
+      // Fix winding (CW -> CCW) so isValidPlot shrink works correctly
+      poly.reverse();
+
+      // Check dimensions before expensive validation
+      // Prevent "Narrow but Deep" slivers
+      const obb = getOBB(poly);
+      // Min width 8m (approx 25ft) to be useful
+      if (obb.width < 8.0) continue;
 
       if (this.isValidPlot(poly)) {
         this.plots.push({
           id: `plot_strip_${this.plotIdCounter++}`,
           points: poly,
           isEnclosed: false,
-          area: calculatePolygonArea(poly),
-          roadIds: chain.edgeIds,
+          area: Math.abs(calculatePolygonArea(poly)),
+          roadIds: edgeIds,
           type: "SUBURBAN_STRIP",
+          halfEdges: this.generateChainKeys(nodeIds),
         });
 
-        // Mark half-edges as occupied
-        for (let i = 0; i < chain.nodeIds.length - 1; i++) {
-          this.occupiedHalfEdges.add(
-            `${chain.nodeIds[i]}->${chain.nodeIds[i + 1]}`
-          );
+        // Mark half-edges as occupied AND Visited
+        for (let i = 0; i < nodeIds.length - 1; i++) {
+          const key = `${nodeIds[i]}->${nodeIds[i + 1]}`;
+          this.occupiedHalfEdges.add(key);
+          visitedStrokes.add(key);
         }
-        break; // Success
+        return true; // Success
       }
     }
+    return false;
   }
 
   private getStrokeStart(u: string, v: string): { start: string; end: string } {
@@ -512,19 +558,22 @@ export class PlotGenerator {
     return boundary;
   }
 
+
+
   // ==================================================================================
   // 4. VALIDATION
+
   // ==================================================================================
 
   private isValidPlot(poly: Point[]): boolean {
     if (poly.length < 3) return false;
     if (calculatePolygonArea(poly) < 50) return false;
 
-    // Permissive overlap check (shrink by 1.5m).
-    // Strip is at 3.0m. Test poly becomes 4.5m.
-    // Downtown is at 2.0m.
-    // Gap = 2.5m. Safe.
-    const testPoly = shrinkPolygon(poly, 1.5);
+    if (calculatePolygonArea(poly) < 50) return false;
+
+    // Strict overlap check (shrink by 0.5m).
+    // Previously 1.5m was too loose, allowing corners to overlap.
+    const testPoly = shrinkPolygon(poly, 0.5);
     if (testPoly.length < 3) return true;
 
     const bb = getBoundingBox(testPoly);
@@ -643,5 +692,181 @@ export class PlotGenerator {
   }
   clearPlots() {
     this.reset();
+  }
+  clearLots() {
+    // lots array was removed by user, so this is no-op or should be removed.
+  }
+
+  // ==================== CLEANUP LOGIC ====================
+
+  private generateChainKeys(nodeIds: string[]): string[] {
+    const keys: string[] = [];
+    for (let i = 0; i < nodeIds.length - 1; i++) {
+      keys.push(`${nodeIds[i]}->${nodeIds[i + 1]}`);
+    }
+    return keys;
+  }
+
+  rebuildOccupancy() {
+    this.occupiedHalfEdges.clear();
+    for (const plot of this.plots) {
+      if (plot.halfEdges) {
+        plot.halfEdges.forEach(k => this.occupiedHalfEdges.add(k));
+      }
+    }
+  }
+
+  cleanupPlots(customValidator?: (plot: Plot) => boolean): boolean {
+    const initialCount = this.plots.length;
+
+    this.plots = this.plots.filter(plot => {
+      // Common checks for all plots
+      if (plot.area < this.params.minBuildingArea) return false;
+
+      // OBB Width Check (Sliver detection)
+      const obb = getOBB(plot.points);
+      if (obb.width < this.params.minEdgeLength) return false;
+
+      // Enclosed plots (Downtown) check
+      if (plot.isEnclosed) {
+        // Angle check
+        const res = validatePolygon(plot.points, this.params.minBuildingArea, 999999, 1, this.params.minAngle);
+        if (!res.valid) return false;
+      }
+      // Strip plots are already filtered by Area/Width above
+
+      // Custom Validator (e.g. Building Viability)
+      if (customValidator && !customValidator(plot)) return false;
+
+      return true;
+    });
+
+    const removed = initialCount > this.plots.length;
+    if (removed) {
+      this.rebuildOccupancy();
+    }
+    return removed;
+  }
+
+  findEmptyRoadLoops(): string[] {
+    const nodeAngles = this.buildNodeAngleMap();
+    const visited = new Set<string>();
+    const edgesToRemove: string[] = [];
+
+    // Check all potentially empty regions
+    for (const edge of this.edges) {
+      if (this.bridgeEdgeIds.has(edge.id)) continue;
+
+      for (const [u, v] of [[edge.startNodeId, edge.endNodeId], [edge.endNodeId, edge.startNodeId]]) {
+        const key = `${u}->${v}`;
+        if (visited.has(key)) continue;
+
+        // If this half-edge is part of a VALID plot, it's not starting an empty loop.
+        // HOWEVER, the loop *might* be on the other side? 
+        // Logic: We want to find a Face where NONE of its bounding half-edges are occupied.
+
+        // Trace the face
+        const result = this.traceFace(u, v, nodeAngles, visited);
+
+        if (result && result.nodes.length > 2) {
+          result.keys.forEach(k => visited.add(k)); // Mark all as visited so we don't check this loop again
+
+          // Check if ANY edge in this loop is occupied
+          const isOccupied = result.keys.some(k => this.occupiedHalfEdges.has(k));
+
+          if (!isOccupied) {
+            // EMPTY LOOP FOUND!
+            // Find the longest edge to break the loop
+            let longestEdgeId = "";
+            let maxLen = -1;
+
+            for (const eid of result.edges) {
+              const e = this.edges.find(ed => ed.id === eid);
+              if (e) {
+                const n1 = this.nodes.get(e.startNodeId);
+                const n2 = this.nodes.get(e.endNodeId);
+                if (n1 && n2) {
+                  const len = Math.hypot(n1.x - n2.x, n1.y - n2.y);
+                  if (len > maxLen) {
+                    maxLen = len;
+                    longestEdgeId = eid;
+                  }
+                }
+              }
+            }
+
+            if (longestEdgeId) {
+              edgesToRemove.push(longestEdgeId);
+            }
+          }
+        }
+      }
+    }
+    return edgesToRemove;
+  }
+
+  private fillGaps() {
+    const visitedStrokes = new Set<string>();
+
+    for (const edge of this.edges) {
+      if (this.bridgeEdgeIds.has(edge.id)) continue;
+
+      const u = edge.startNodeId;
+      const v = edge.endNodeId;
+
+      const fwd = `${u}->${v}`;
+      const bwd = `${v}->${u}`;
+
+      const fwdOcc = this.occupiedHalfEdges.has(fwd);
+      const bwdOcc = this.occupiedHalfEdges.has(bwd);
+
+      // Check if nodes are "Active" (connected to an occupied road)
+      // This ensures we continue streets even if there's a gap
+      const uActive = this.isNodeActive(u, v);
+      const vActive = this.isNodeActive(v, u);
+
+      // Forward Gap?
+      if (!fwdOcc) {
+        // Condition: Opposite is occupied, OR we are connected to an existing street
+        if (bwdOcc || uActive || vActive) {
+          this.attemptStroke(
+            u,
+            v,
+            30, // Shallower depth for infill
+            visitedStrokes
+          );
+        }
+      }
+
+      // Backward Gap?
+      if (!bwdOcc) {
+        if (fwdOcc || uActive || vActive) {
+          this.attemptStroke(
+            v,
+            u,
+            30, // Shallower depth for infill
+            visitedStrokes
+          );
+        }
+      }
+    }
+  }
+
+  private isNodeActive(nodeId: string, excludeNodeId: string): boolean {
+    const node = this.nodes.get(nodeId);
+    if (!node) return false;
+
+    for (const neighborId of node.connections) {
+      if (neighborId === excludeNodeId) continue;
+
+      // Check if the road connecting to neighbor is occupied on EITHER side
+      if (
+        this.occupiedHalfEdges.has(`${nodeId}->${neighborId}`) ||
+        this.occupiedHalfEdges.has(`${neighborId}->${nodeId}`)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 }

@@ -94,7 +94,8 @@ export class CityGenerator {
       params,
       this.nodes,
       this.edges,
-      this.blockGen.blocks
+      this.blockGen.blocks,
+      this.waterGen
     );
 
     this.reset();
@@ -307,7 +308,7 @@ export class CityGenerator {
   }
 
   startBuildingGeneration() {
-    this.buildingGen.updateRefs(this.nodes, this.edges, this.blockGen.plots);
+    this.buildingGen.updateRefs(this.nodes, this.edges, this.blockGen.blocks);
     this.buildingGen.startGeneration();
   }
 
@@ -674,13 +675,97 @@ export class CityGenerator {
     this.activeAgents.push(...newAgents);
 
     // Periodically fill empty areas
-    this.stepCounter++;
     if (
       this.stepCounter % this.fillCheckInterval === 0 &&
       this.nodes.size > 20
     ) {
       this.fillEmptyAreas();
     }
+  }
+
+  // ==================== CLEANUP ====================
+
+  removeEdge(edgeId: string) {
+    const idx = this.edges.findIndex(e => e.id === edgeId);
+    if (idx === -1) return;
+
+    const edge = this.edges[idx];
+    this.edges.splice(idx, 1);
+
+    // Update node connections
+    const n1 = this.nodes.get(edge.startNodeId);
+    if (n1) {
+      n1.connections = n1.connections.filter(id => id !== edge.endNodeId);
+    }
+    const n2 = this.nodes.get(edge.endNodeId);
+    if (n2) {
+      n2.connections = n2.connections.filter(id => id !== edge.startNodeId);
+    }
+
+    // Optional: Remove isolated nodes
+    if (n1 && n1.connections.length === 0) this.nodes.delete(n1.id);
+    if (n2 && n2.connections.length === 0) this.nodes.delete(n2.id);
+  }
+
+  pruneSpurs(): boolean {
+    let removedAny = false;
+    // Iterate backwards so we can remove safely
+    for (let i = this.edges.length - 1; i >= 0; i--) {
+      const edge = this.edges[i];
+      const n1 = this.nodes.get(edge.startNodeId);
+      const n2 = this.nodes.get(edge.endNodeId);
+
+      if (!n1 || !n2) continue;
+
+      // Check for Spur condition:
+      let tip: Node | null = null;
+      let root: Node | null = null;
+
+      if (n1.connections.length === 1 && n2.connections.length >= 3) {
+        tip = n1;
+        root = n2;
+      } else if (n2.connections.length === 1 && n1.connections.length >= 3) {
+        tip = n2;
+        root = n1;
+      }
+
+      if (tip && root) {
+        this.removeEdge(edge.id);
+        removedAny = true;
+      }
+    }
+    return removedAny;
+  }
+
+  cleanup() {
+    let iterations = 0;
+    const maxIterations = 10;
+
+    while (iterations < maxIterations) {
+      // 1. Remove Spurs (Dead ends attached to junctions)
+      this.pruneSpurs();
+
+      // 2. Remove Invalid Plots
+      // Pass a validator to check if we can actually build there
+      this.blockGen.cleanupPlots((plot) => this.buildingGen.canFitBuilding(plot));
+
+      // 3. Remove Empty Loops
+      const edgesToRemove = this.blockGen.findEmptyRoadLoops();
+
+      if (edgesToRemove.length > 0) {
+        edgesToRemove.forEach(id => this.removeEdge(id));
+        this.generateBlocks(); // Regenerate to reflect graph changes
+        // Continue loop to check new state
+      } else {
+        // No structural changes needed.
+        // If plots were removed, they stay removed.
+        break;
+      }
+      iterations++;
+    }
+
+    // Final sync
+    this.buildingGen.updateRefs(this.nodes, this.edges, this.blockGen.blocks);
   }
 
   // ==================== HELPER METHODS ====================
